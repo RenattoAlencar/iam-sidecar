@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: iam.sidecar
+
+
+proxy:
+  target: http://127.0.0.1:8081
+  intercept-rules:
+    - name: pix-transfer
+      path: /api/v1/pix/transferencia
+      methods: [POST]
+
+    - name: pix-keys-register
+      path: /api/v1/pix/chaves
+      methods: [POST]
+
+    - name: boleto-payment
+      path: /api/v2/pagamentos/boletos/codigo-de-barras/pagamento
+      methods: [POST]
+
+    - name: limite-consulta
+      path: /api/v1/conta/limites/transacionais
+      methods: [GET]
