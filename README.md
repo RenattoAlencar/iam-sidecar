@@ -333,6 +333,315 @@ listado atravessa sem verificação.
 
 ---
 
+## Verificando o comportamento com chamadas
+
+Depois de conferir o log de boot, vale exercitar as rotas para confirmar que a
+configuração produz o efeito esperado.
+
+Os comandos abaixo estão em **PowerShell**. Use `curl.exe`, não `curl` — no
+PowerShell, `curl` é apelido de outro comando e vai falhar.
+
+**A porta depende de como o sidecar está rodando:**
+
+| Como está rodando | Porta do canal | Porta do actuator |
+|-------------------|----------------|-------------------|
+| Local (`mvn spring-boot:run`) | 8080 | 8090 |
+| Container, conforme o mapeamento | 18080 | 18090 |
+
+Os exemplos usam `8080`. Ajuste se estiver em container.
+
+**Parâmetros que aparecem nos comandos:**
+
+| Parâmetro | Para que serve |
+|-----------|----------------|
+| `-i` | mostra os headers da resposta junto com o corpo |
+| `-s` | modo silencioso, sem barra de progresso |
+| `-o NUL` | descarta o corpo (quando só interessa o status) |
+| `-w "%{http_code}"` | imprime o código HTTP da resposta |
+| `` `n `` | quebra de linha no PowerShell (crase + n) |
+
+---
+
+### Como saber quem respondeu
+
+Esta é a leitura mais importante. O corpo da resposta diz se a requisição chegou
+ao BFF ou morreu no sidecar:
+
+| A resposta tem | Quem respondeu |
+|----------------|----------------|
+| corpo do BFF, com os dados de negócio | **BFF** — a requisição atravessou |
+| `{"error": "...", "correlationId": "..."}` | **sidecar** — morreu ali |
+
+Nos testes de rota protegida, o que se confere é justamente isso: se aparecer
+resposta do BFF, a requisição chegou lá quando não deveria.
+
+---
+
+### 1. A aplicação está de pé
+
+```powershell
+curl.exe -s localhost:8090/actuator/health
+```
+
+**Retorno esperado:**
+
+```json
+{
+  "status": "UP",
+  "groups": ["liveness", "readiness"]
+}
+```
+
+---
+
+### 2. Rota fora da matriz atravessa
+
+```powershell
+curl.exe -i localhost:8080/api/v1/conta/extrato
+```
+
+**Retorno esperado:** `200`, com a resposta do BFF.
+
+```
+HTTP/1.1 200
+X-Correlation-Id: kQ8xR2vN7pL
+Content-Type: application/json
+
+<resposta do BFF>
+```
+
+**Confirma que:** o sidecar é invisível em rota que não está na matriz.
+
+---
+
+### 3. Rota da matriz é barrada
+
+```powershell
+curl.exe -i -X POST localhost:8080/api/v1/pix/transferencia -H "Content-Type: application/json" -d '{\"valor\":50}'
+```
+
+**Retorno esperado:** `401`, com corpo curto do sidecar.
+
+```
+HTTP/1.1 401
+X-Correlation-Id: kQ8xR2vN7pL
+Content-Type: application/json
+
+{"error":"confirmation_required","correlationId":"kQ8xR2vN7pL"}
+```
+
+**Confirma que:** a requisição morreu no sidecar. Repare que não há resposta do
+BFF — se houvesse, teria chegado lá.
+
+> `confirmation_required` é a resposta enquanto o bloco de confirmação não
+> existe. Quando existir, este mesmo `401` trará o desafio no corpo.
+
+---
+
+### 4. O verbo muda o desfecho no mesmo endereço
+
+```powershell
+curl.exe -s -o NUL -w "GET  chaves: %{http_code}`n" localhost:8080/api/v1/pix/chaves
+curl.exe -s -o NUL -w "POST chaves: %{http_code}`n" -X POST localhost:8080/api/v1/pix/chaves
+```
+
+**Retorno esperado:**
+
+```
+GET  chaves: 200
+POST chaves: 401
+```
+
+**Confirma que:** a matriz distingue método. Só o `POST` está declarado.
+
+---
+
+### 5. GET também pode estar na matriz
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}`n" localhost:8080/api/v1/conta/limites/transacionais
+```
+
+**Retorno esperado:**
+
+```
+401
+```
+
+**Confirma que:** o critério é a operação, não o verbo.
+
+---
+
+### 6. Trocar a grafia do endereço não contorna a matriz
+
+```powershell
+curl.exe -s -o NUL -w "barra final: %{http_code}`n" -X POST "localhost:8080/api/v1/pix/transferencia/"
+curl.exe -s -o NUL -w "barra dupla: %{http_code}`n" -X POST "localhost:8080/api//v1/pix/transferencia"
+curl.exe -s -o NUL -w "codificado:  %{http_code}`n" -X POST "localhost:8080/api/v1/%70ix/transferencia"
+```
+
+**Retorno esperado:**
+
+```
+barra final: 401
+barra dupla: 401
+codificado:  401
+```
+
+**Confirma que:** as três formas chegariam ao mesmo lugar no BFF, e todas
+continuam barradas. (`%70` é a letra `p` — o sidecar decodifica antes de
+comparar.)
+
+---
+
+### 7. Endereço suspeito é recusado
+
+```powershell
+curl.exe -s -o NUL -w "navegacao: %{http_code}`n" --path-as-is -X POST "localhost:8080/api/v1/pix/../pix/transferencia"
+curl.exe -s -o NUL -w "separador: %{http_code}`n" -X POST "localhost:8080/api%2Fv1/pix/transferencia"
+```
+
+**Retorno esperado:**
+
+```
+navegacao: 400
+separador: 400
+```
+
+Com `-i`, o corpo:
+
+```
+HTTP/1.1 400
+Content-Type: application/json
+
+{"error":"bad_request","correlationId":"kQ8xR2vN7pL"}
+```
+
+**Confirma que:** endereço malformado morre, em vez de ser corrigido e
+encaminhado.
+
+> O `--path-as-is` é necessário no primeiro comando: sem ele, o próprio curl
+> resolve o `..` antes de enviar, e o teste não testa nada.
+
+---
+
+### 8. Header reservado não atravessa
+
+Só faz sentido se `reserved-headers` estiver configurado. Substitua pelo nome
+que você declarou.
+
+```powershell
+curl.exe -s localhost:8080/api/v1/conta/extrato -H "x-sidecar-verified: true" | Select-String "sidecar-verified"
+```
+
+**Retorno esperado: nenhuma saída.**
+
+**Confirma que:** o canal tentou enviar um header que só o sidecar deveria
+escrever, e ele foi descartado antes do encaminhamento.
+
+> Este teste depende de o BFF revelar os headers que recebeu. Se o BFF de
+> destino não fizer isso, o jeito de verificar é olhar o log do sidecar: ele
+> registra em nível de alerta quando descarta um header reservado vindo do
+> chamador.
+
+**Se o header aparecer**, conferir primeiro se a configuração chegou:
+
+```powershell
+# no log de boot
+Headers reservados ao sidecar: [x-sidecar-verified]
+```
+
+Se aparecer `Nenhum header reservado ao sidecar configurado`, a variável
+`SIDECAR_RESERVED_HEADERS` não chegou.
+
+---
+
+### 9. Corpo acima do teto é recusado
+
+**Criar um arquivo maior que o teto configurado:**
+
+```powershell
+[System.IO.File]::WriteAllText("$PWD\big.txt", ("x" * 3000000))
+```
+
+Conferir o tamanho:
+
+```powershell
+(Get-Item big.txt).Length
+```
+
+Precisa ser maior que o `max-body-bytes`. Com o padrão de 2 MiB (2097152), o
+arquivo acima tem 3 MB e serve.
+
+**Enviar:**
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST localhost:8080/api/v1/conta/busca --data-binary "@big.txt"
+```
+
+**Retorno esperado:**
+
+```
+413
+```
+
+**Confirma que:** o sidecar protege a memória do pod, que ele divide com o BFF.
+
+---
+
+### 10. Rastreabilidade
+
+```powershell
+curl.exe -i localhost:8080/api/v1/conta/extrato -H "X-Correlation-Id: chamado-4711"
+```
+
+**Retorno esperado** — o mesmo valor de volta no header:
+
+```
+HTTP/1.1 200
+X-Correlation-Id: chamado-4711
+```
+
+E no log do sidecar:
+
+```
+14:32:07.881 INFO  [chamado-4711] c.d.i.s.proxy.ProxyFilter - Rota fora da matriz, encaminhando sem verificação
+```
+
+**Confirma que:** dá para ligar um chamado de suporte a uma linha de log.
+
+---
+
+### Resumo das verificações
+
+| # | O que se chama | Está na matriz? | Esperado |
+|---|----------------|-----------------|----------|
+| 1 | `/actuator/health` | — | `200` `UP` |
+| 2 | rota comum | não | `200` do BFF |
+| 3 | rota protegida | **sim** | `401` do sidecar |
+| 4 | `GET` e `POST` no mesmo endereço | GET não, POST sim | `200` e `401` |
+| 5 | `GET` declarado | **sim** | `401` |
+| 6 | grafia diferente do endereço | **sim** | `401` nas três |
+| 7 | endereço malformado | — | `400` nas duas |
+| 8 | header reservado | não | não chega ao BFF |
+| 9 | corpo acima do teto | não | `413` |
+| 10 | correlação | não | mesmo valor no log |
+
+### Se algum resultado divergir
+
+| Sintoma | Causa provável |
+|---------|----------------|
+| **`200` onde se esperava `401`** | **A rota não está na matriz — o caso mais perigoso.** Conferir o log de boot |
+| `401` onde se esperava `200` | A rota está na matriz; conferir o log de boot |
+| Tudo responde `502` | O BFF não está de pé, ou `target` aponta para a porta errada |
+| O sidecar não sobe | Ver a tabela da seção seguinte |
+| O `..` não dá `400` | Faltou `--path-as-is` |
+| Corpo grande dá `200` | O arquivo não é maior que o teto — conferir com `(Get-Item big.txt).Length` |
+| Header reservado atravessa | `SIDECAR_RESERVED_HEADERS` não configurado — conferir no log de boot |
+| `curl` reclama de sintaxe | Use `curl.exe` |
+
+---
+
 ## O que derruba o boot
 
 O sidecar prefere não subir a subir com configuração inconsistente — um sidecar
