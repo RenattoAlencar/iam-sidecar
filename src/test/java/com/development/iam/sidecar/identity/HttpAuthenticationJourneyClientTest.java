@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+import tools.jackson.databind.ObjectMapper;
 
 import java.net.URI;
 import java.time.Duration;
@@ -49,6 +50,7 @@ class HttpAuthenticationJourneyClientTest {
     private static final String AUTHENTICATE_PATH = "/am/json/realms/" + REALM + "/authenticate";
 
     /** Nomes fictícios: os reais vêm de configuração e não pertencem ao código. */
+    private static final String CHANNEL_TOKEN_HEADER = "x-canal-authentication";
     private static final String CODE_HEADER = "x-canal-token";
 
     /** Passo 1: desafio de biometria. */
@@ -141,12 +143,33 @@ class HttpAuthenticationJourneyClientTest {
                         .withBody(body)));
     }
 
+    /**
+     * O que o canal preenche no campo de entrada: um JSON em texto, dentro do
+     * JSON da requisição.
+     * <p>
+     * Definido uma vez e usado tanto ao montar a resposta quanto ao verificar o
+     * corpo enviado. Escrever o valor esperado à mão exigiria contar níveis de
+     * escape, e um a mais ou a menos produz uma falha que parece defeito do
+     * cliente.
+     */
+    private static final String ANSWER_PAYLOAD =
+            "{\"foto\":\"<base64>\",\"channel\":\"app\"}";
+
     private static List<Map<String, Object>> answeredWithSelfie() {
         return List.of(Map.of(
                 "type", "NameCallback",
                 "output", List.of(Map.of("name", "prompt", "value", "CHALLENGE_REQUIRED")),
-                "input", List.of(Map.of("name", "IDToken1",
-                        "value", "{\"foto\":\"<base64>\",\"channel\":\"app\"}"))));
+                "input", List.of(Map.of("name", "IDToken1", "value", ANSWER_PAYLOAD))));
+    }
+
+    /**
+     * Monta o corpo esperado usando o mesmo valor, com o escape aplicado pelo
+     * serializador em vez de à mão.
+     */
+    private static String expectedAdvanceBody() {
+        return new ObjectMapper().writeValueAsString(Map.of(
+                "authId", AUTH_ID,
+                "callbacks", answeredWithSelfie()));
     }
 
     @Nested
@@ -265,23 +288,7 @@ class HttpAuthenticationJourneyClientTest {
             client.advance(AUTH_ID, answeredWithSelfie());
 
             gateway.verify(postRequestedFor(urlPathEqualTo(AUTHENTICATE_PATH))
-                    .withRequestBody(equalToJson("""
-                            {
-                              "authId": "%s",
-                              "callbacks": [
-                                {
-                                  "type": "NameCallback",
-                                  "output": [
-                                    { "name": "prompt", "value": "CHALLENGE_REQUIRED" }
-                                  ],
-                                  "input": [
-                                    { "name": "IDToken1",
-                                      "value": "{\\"foto\\":\\"<base64>\\",\\"channel\\":\\"app\\"}" }
-                                  ]
-                                }
-                              ]
-                            }
-                            """.formatted(AUTH_ID))));
+                    .withRequestBody(equalToJson(expectedAdvanceBody())));
         }
 
         /**

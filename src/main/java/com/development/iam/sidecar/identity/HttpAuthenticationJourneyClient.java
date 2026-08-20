@@ -259,9 +259,11 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             return "sem detalhe";
         }
         try {
-            Map<?, ?> error = JsonSupport.read(body, Map.class);
-            Object message = error.get("message");
-            return message == null ? "sem detalhe" : String.valueOf(message);
+            // Leitura em arvore em vez de mapa tipado: o corpo de erro nao e
+            // contrato estavel, e desserializar para Map sem tipo parametrizado
+            // e fragil.
+            var message = JsonSupport.readTree(body).get("message");
+            return message == null || message.isNull() ? "sem detalhe" : message.asString();
         } catch (Exception e) {
             return "sem detalhe";
         }

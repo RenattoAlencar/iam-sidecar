@@ -23,4 +23,14 @@ final class JsonSupport {
     static <T> T read(String json, Class<T> type) {
         return OBJECT_MAPPER.readValue(json, type);
     }
+
+    /**
+     * Lê como árvore, para extrair um campo sem modelar a estrutura inteira.
+     * <p>
+     * Usado no corpo de erro do gateway, cujo formato não é contrato estável e
+     * não vale a pena tipar.
+     */
+    static tools.jackson.databind.JsonNode readTree(String json) {
+        return OBJECT_MAPPER.readTree(json);
+    }
 }
