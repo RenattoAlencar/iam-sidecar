@@ -28,11 +28,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 /**
  * Verifica a tradução de decisão em resposta HTTP e, principalmente, o que
@@ -79,7 +75,9 @@ class ProxyFilterTest {
         return JourneyOutcome.challenge(new JourneyStep(AUTH_ID, callbacks(), null));
     }
 
-    /** Requisição com o token do canal, como o gateway de borda a entregaria. */
+    /**
+     * Requisição com o token do canal, como o gateway de borda a entregaria.
+     */
     private static MockHttpServletRequest authenticated(String method, String uri) {
         MockHttpServletRequest request = request(method, uri);
         request.addHeader(TOKEN_HEADER, CHANNEL_TOKEN);
