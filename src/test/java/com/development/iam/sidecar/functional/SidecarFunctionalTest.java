@@ -1,7 +1,11 @@
 package com.development.iam.sidecar.functional;
 
 import com.development.iam.sidecar.proxy.CorrelationId;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -16,6 +20,24 @@ import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Cenários ponta a ponta: canal → sidecar → BFF, sobre HTTP real.
+ * <p>
+ * Sobe o sidecar em porta aleatória e um BFF de eco em outra, ambos em loopback.
+ * Não há Docker nem processo externo: o conjunto roda no {@code mvn test} e no
+ * pipeline, que é a diferença entre um teste que pega regressão e uma coleção
+ * que alguém executa uma vez e esquece.
+ *
+ * <h2>O que se verifica além do status</h2>
+ * Quase todo cenário confere <strong>o que chegou ao BFF</strong>, não apenas o
+ * que o sidecar respondeu. Um proxy que devolve o status certo pode ter entregue
+ * ao BFF uma requisição com header forjado ou com a cadeia de encaminhamento
+ * corrompida — e o canal não teria como perceber.
+ * <p>
+ * Nas recusas, a asserção é o contador de requisições do BFF: precisa ficar
+ * intacto. Verificar só o status não distinguiria "recusou" de "recusou depois
+ * de encaminhar".
+ */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "proxy.connect-timeout=1s",
@@ -29,7 +51,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 
                 "proxy.intercept-rules[1].name=pix-keys-register",
                 "proxy.intercept-rules[1].path=/api/v1/pix/chaves",
-                "proxy.intercept-rules[1].methods[0]=POST"
+                "proxy.intercept-rules[1].methods[0]=POST",
+
+                // O contexto exige a configuração do gateway para subir, mesmo
+                // que nenhum cenário aqui chegue a chamá-lo: rota interceptada é
+                // barrada antes disso, e as demais nem passam por confirmação.
+                //
+                // O endereço aponta para um host que não resolve de propósito. Se
+                // algum cenário passar a alcançar o gateway sem que ninguém
+                // perceba, ele falha por indisponibilidade em vez de sair pela
+                // rede — que é o comportamento correto num teste que deveria ser
+                // fechado.
+                "identity.base-url=https://gateway-inexistente.invalid/am",
+                "identity.journey=jornada-de-teste",
+                "identity.client-id=cliente-de-teste",
+                "identity.client-secret=segredo-de-teste",
+                "identity.redirect-uri=https://retorno-de-teste.invalid/callback",
+                "identity.session-cookie-name=cookie-de-sessao",
+                "identity.channel-token-header=x-canal-autenticacao",
+                "identity.connect-timeout=200ms",
+                "identity.read-timeout=200ms"
         })
 class SidecarFunctionalTest {
 
@@ -43,6 +84,11 @@ class SidecarFunctionalTest {
         }
     }
 
+    /**
+     * O alvo aponta para o BFF de eco, em loopback e porta aleatória. A
+     * validação de boot exige loopback, e {@code 127.0.0.1} atende — a mesma
+     * invariante que vale em produção vale aqui, sem exceção para teste.
+     */
     @DynamicPropertySource
     static void proxyTarget(DynamicPropertyRegistry registry) {
         registry.add("proxy.target", BACKEND::baseUrl);
@@ -135,17 +181,51 @@ class SidecarFunctionalTest {
             assertThat(BACKEND.receivedRequests()).isEqualTo(1);
         }
 
+        /**
+         * Rota interceptada não alcança o BFF, aconteça o que acontecer com a
+         * jornada. O contador é a asserção que separa "barrou" de "barrou depois
+         * de encaminhar".
+         * <p>
+         * Sem token do canal, o sidecar recusa antes de chamar o gateway — que
+         * aqui não existe. É o cenário que isola a decisão de rota do
+         * comportamento da jornada.
+         */
         @Test
-        @DisplayName("rota interceptada é negada e não alcança o BFF")
-        void interceptedRouteIsDeniedAndNeverReachesBackend() throws Exception {
+        @DisplayName("rota interceptada sem token do canal é barrada e não alcança o BFF")
+        void interceptedRouteWithoutTokenIsBlockedAndNeverReachesBackend() throws Exception {
             HttpResponse<String> response = send(toSidecar("/api/v1/pix/transferencia")
                     .POST(HttpRequest.BodyPublishers.ofString("{\"valor\":50}"))
                     .build());
 
             assertThat(response.statusCode()).isEqualTo(401);
+            assertThat(response.body()).contains("session_required");
             assertThat(BACKEND.receivedRequests()).isZero();
         }
 
+        /**
+         * Com token, o sidecar tenta a jornada. O gateway configurado não existe,
+         * então o desfecho é indisponibilidade — e o que importa é que a
+         * requisição continua não alcançando o BFF.
+         * <p>
+         * Fail-closed: falha de dependência nunca libera a requisição.
+         */
+        @Test
+        @DisplayName("gateway indisponível não libera a rota interceptada")
+        void unavailableGatewayDoesNotReleaseInterceptedRoute() throws Exception {
+            HttpResponse<String> response = send(toSidecar("/api/v1/pix/transferencia")
+                    .header("x-canal-autenticacao", "eyJhbGciOiJIUzI1NiJ9.token.assinatura")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"valor\":50}"))
+                    .build());
+
+            assertThat(response.statusCode()).isEqualTo(503);
+            assertThat(response.body()).contains("authorization_unavailable");
+            assertThat(BACKEND.receivedRequests()).isZero();
+        }
+
+        /**
+         * O mesmo endereço com verbos diferentes e desfechos opostos: listar as
+         * próprias chaves é consulta, cadastrar uma nova redireciona dinheiro.
+         */
         @Test
         @DisplayName("o verbo muda o desfecho no mesmo endereço")
         void methodChangesOutcomeOnSamePath() throws Exception {
@@ -158,6 +238,7 @@ class SidecarFunctionalTest {
                     .POST(HttpRequest.BodyPublishers.ofString("{}"))
                     .build());
 
+            // Sem token do canal: barrado antes de qualquer chamada ao gateway.
             assertThat(registration.statusCode()).isEqualTo(401);
             assertThat(BACKEND.receivedRequests()).isZero();
         }
@@ -223,6 +304,10 @@ class SidecarFunctionalTest {
     @DisplayName("cenário 4 — headers")
     class Headers {
 
+        /**
+         * A garantia que sustenta o controle. Se o header reservado atravessasse,
+         * o canal declararia por conta própria que a confirmação aconteceu.
+         */
         @Test
         @DisplayName("header reservado enviado pelo canal não alcança o BFF")
         void reservedHeaderFromChannelDoesNotReachBackend() throws Exception {
@@ -243,6 +328,10 @@ class SidecarFunctionalTest {
             assertThat(response.body()).contains("\"x-canal-origem\":[\"superapp\"]");
         }
 
+        /**
+         * O IP real do cliente é o dado usado em investigação de fraude: precisa
+         * chegar ao BFF uma vez só, com a cadeia inteira.
+         */
         @Test
         @DisplayName("a cadeia de encaminhamento chega com um único valor")
         void forwardedChainArrivesOnce() throws Exception {
@@ -287,6 +376,10 @@ class SidecarFunctionalTest {
             assertThat(response.headers().firstValue(CorrelationId.HEADER)).contains("chamado-4711");
         }
 
+        /**
+         * Valor com caractere fora do formato permitiria escrever registro falso
+         * dentro do arquivo de log. É substituído sem aviso.
+         */
         @Test
         @DisplayName("identificador que contaminaria o log é substituído")
         void logPollutingCorrelationIdIsReplaced() throws Exception {
@@ -306,6 +399,23 @@ class SidecarFunctionalTest {
                     .POST(HttpRequest.BodyPublishers.noBody()).build());
 
             assertThat(response.body()).contains("correlationId");
+        }
+
+        /**
+         * O endpoint de resposta ao desafio é do sidecar. Precisa ser tratado
+         * aqui, nunca encaminhado ao BFF — que não o tem.
+         */
+        @Test
+        @DisplayName("o endpoint de desafio não é encaminhado ao BFF")
+        void challengeEndpointIsNotForwarded() throws Exception {
+            HttpResponse<String> response = send(toSidecar("/ciam/challenge")
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"callbacks\":[]}"))
+                    .build());
+
+            // Sem identificador de jornada: recusado antes de chamar o gateway.
+            assertThat(response.statusCode()).isEqualTo(400);
+            assertThat(BACKEND.receivedRequests()).isZero();
         }
     }
 
@@ -337,6 +447,10 @@ class SidecarFunctionalTest {
             assertThat(response.body()).contains("\"bodyLength\":512");
         }
 
+        /**
+         * BFF que não responde no prazo vira falha de dependência, e o corpo
+         * devolvido não revela endereço nem porta do backend.
+         */
         @Test
         @DisplayName("BFF lento vira 502 sem revelar o endereço interno")
         void slowBackendBecomesBadGateway() throws Exception {

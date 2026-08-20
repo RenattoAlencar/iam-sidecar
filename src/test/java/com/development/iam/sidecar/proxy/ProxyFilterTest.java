@@ -1,466 +1,613 @@
 package com.development.iam.sidecar.proxy;
 
-import com.development.iam.sidecar.functional.EchoBackend;
-import com.development.iam.sidecar.proxy.CorrelationId;
-import org.junit.jupiter.api.AfterAll;
+import com.development.iam.sidecar.config.ChannelProperties;
+import com.development.iam.sidecar.config.IdentityProperties;
+import com.development.iam.sidecar.config.InterceptRule;
+import com.development.iam.sidecar.identity.AuthenticationJourneyClient;
+import com.development.iam.sidecar.identity.JourneyOutcome;
+import com.development.iam.sidecar.identity.JourneyStep;
+import com.development.iam.sidecar.route.RouteResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.http.HttpMethod;
+import org.springframework.mock.web.MockFilterChain;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+import tools.jackson.databind.ObjectMapper;
 
-import java.io.IOException;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
 
 /**
- * Cenários ponta a ponta: canal → sidecar → BFF, sobre HTTP real.
+ * Verifica a tradução de decisão em resposta HTTP e, principalmente, o que
+ * <strong>não</strong> chega ao BFF.
  * <p>
- * Sobe o sidecar em porta aleatória e um BFF de eco em outra, ambos em loopback.
- * Não há Docker nem processo externo: o conjunto roda no {@code mvn test} e no
- * pipeline, que é a diferença entre um teste que pega regressão e uma coleção
- * que alguém executa uma vez e esquece.
- *
- * <h2>O que se verifica além do status</h2>
- * Quase todo cenário confere <strong>o que chegou ao BFF</strong>, não apenas o
- * que o sidecar respondeu. Um proxy que devolve o status certo pode ter entregue
- * ao BFF uma requisição com header forjado ou com a cadeia de encaminhamento
- * corrompida — e o canal não teria como perceber.
- * <p>
- * Nas recusas, a asserção é o contador de requisições do BFF: precisa ficar
- * intacto. Verificar só o status não distinguiria "recusou" de "recusou depois
- * de encaminhar".
+ * Um filtro que responde o status certo mas encaminha assim mesmo é pior do que
+ * um que responde errado: a resposta ao canal esconde que a requisição passou.
+ * Por isso quase todo teste aqui confere o encaminhamento, não só o status.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {
-                "proxy.connect-timeout=1s",
-                "proxy.read-timeout=1s",
-                "proxy.max-body-bytes=1024",
-                "proxy.reserved-headers[0]=x-sidecar-verified",
+class ProxyFilterTest {
 
-                "proxy.intercept-rules[0].name=pix-transfer",
-                "proxy.intercept-rules[0].path=/api/v1/pix/transferencia",
-                "proxy.intercept-rules[0].methods[0]=POST",
+    private static final String PIX_TRANSFER = "/api/v1/pix/transferencia";
+    private static final String BALANCE = "/api/v1/conta/saldo";
 
-                "proxy.intercept-rules[1].name=pix-keys-register",
-                "proxy.intercept-rules[1].path=/api/v1/pix/chaves",
-                "proxy.intercept-rules[1].methods[0]=POST",
+    private static final String TOKEN_HEADER = "x-canal-autenticacao";
+    private static final String CODE_HEADER = "x-canal-codigo";
+    private static final String CHANNEL_TOKEN = "eyJhbGciOiJIUzI1NiJ9.token-do-canal";
+    private static final String AUTH_ID = "identificador-da-jornada";
+    private static final String CHALLENGE_PATH = "/ciam/challenge";
 
-                // O contexto exige a configuração do gateway para subir, mesmo
-                // que nenhum cenário aqui chegue a chamá-lo: rota interceptada é
-                // barrada antes disso, e as demais nem passam por confirmação.
-                //
-                // O endereço aponta para um host que não resolve de propósito. Se
-                // algum cenário passar a alcançar o gateway sem que ninguém
-                // perceba, ele falha por indisponibilidade em vez de sair pela
-                // rede — que é o comportamento correto num teste que deveria ser
-                // fechado.
-                "identity.base-url=https://gateway-inexistente.invalid/am",
-                "identity.journey=jornada-de-teste",
-                "identity.client-id=cliente-de-teste",
-                "identity.client-secret=segredo-de-teste",
-                "identity.redirect-uri=https://retorno-de-teste.invalid/callback",
-                "identity.session-cookie-name=cookie-de-sessao",
-                "identity.channel-token-header=x-canal-autenticacao",
-                "identity.connect-timeout=200ms",
-                "identity.read-timeout=200ms"
-        })
-class SidecarFunctionalTest {
+    private final RequestForwarder forwarder = mock(RequestForwarder.class);
+    private final AuthenticationJourneyClient journeyClient =
+            mock(AuthenticationJourneyClient.class);
+    private final MockFilterChain chain = new MockFilterChain();
 
-    private static final EchoBackend BACKEND = startBackend();
+    private ProxyFilter filter;
 
-    private static EchoBackend startBackend() {
-        try {
-            return EchoBackend.start();
-        } catch (IOException e) {
-            throw new IllegalStateException("Não foi possível subir o BFF de eco", e);
-        }
+    private static IdentityProperties identityProperties() {
+        return new IdentityProperties(
+                URI.create("https://gateway.exemplo.com.br/am"),
+                "alpha", "jornada-de-teste", "service",
+                "cliente", "segredo", "https://retorno/callback", "openid", "cookie-de-sessao",
+                TOKEN_HEADER, CODE_HEADER,
+                Duration.ofSeconds(2), Duration.ofSeconds(10));
+    }
+
+    private static List<Map<String, Object>> callbacks() {
+        return List.of(Map.of(
+                "type", "NameCallback",
+                "output", List.of(Map.of("name", "prompt", "value", "CHALLENGE_REQUIRED"))));
+    }
+
+    private static JourneyOutcome challenge() {
+        return JourneyOutcome.challenge(new JourneyStep(AUTH_ID, callbacks(), null));
     }
 
     /**
-     * O alvo aponta para o BFF de eco, em loopback e porta aleatória. A
-     * validação de boot exige loopback, e {@code 127.0.0.1} atende — a mesma
-     * invariante que vale em produção vale aqui, sem exceção para teste.
+     * Requisição com o token do canal, como o gateway de borda a entregaria.
      */
-    @DynamicPropertySource
-    static void proxyTarget(DynamicPropertyRegistry registry) {
-        registry.add("proxy.target", BACKEND::baseUrl);
+    private static MockHttpServletRequest authenticated(String method, String uri) {
+        MockHttpServletRequest request = request(method, uri);
+        request.addHeader(TOKEN_HEADER, CHANNEL_TOKEN);
+        return request;
     }
 
-    @AfterAll
-    static void stopBackend() {
-        BACKEND.close();
+    private static RouteResolver resolver() {
+        return new RouteResolver(List.of(
+                new InterceptRule("pix-transfer", PIX_TRANSFER, Set.of(HttpMethod.POST))));
     }
-
-    @LocalServerPort
-    private int sidecarPort;
-
-    private final HttpClient client = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(2))
-            .build();
 
     @BeforeEach
-    void resetBackend() {
-        BACKEND.resetCounter();
+    void setUp() {
+        when(forwarder.framingRejection(any())).thenReturn(Optional.empty());
+        filter = new ProxyFilter(resolver(), forwarder, journeyClient,
+                identityProperties(), new ChannelProperties(CHALLENGE_PATH),
+                new ObjectMapper());
     }
 
-    private HttpRequest.Builder toSidecar(String path) {
-        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + sidecarPort + path))
-                .timeout(Duration.ofSeconds(10));
-    }
-
-    private HttpResponse<String> send(HttpRequest request) throws Exception {
-        return client.send(request, HttpResponse.BodyHandlers.ofString());
-    }
-
-    @Nested
-    @DisplayName("cenário 1 — o proxy é transparente")
-    class TransparentProxy {
-
-        @Test
-        @DisplayName("resposta do BFF chega ao canal com status, headers e corpo preservados")
-        void preservesBackendResponse() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo").GET().build());
-
-            assertThat(response.statusCode()).isEqualTo(200);
-            assertThat(response.headers().firstValue("X-Backend-Marker")).contains("echo");
-            assertThat(response.body()).contains("\"method\":\"GET\"");
-            assertThat(BACKEND.receivedRequests()).isEqualTo(1);
-        }
-
-        @Test
-        @DisplayName("o BFF recebe o path e a query como foram enviados")
-        void preservesPathAndQuery() throws Exception {
-            HttpResponse<String> response = send(
-                    toSidecar("/api/v1/conta/extrato?de=2026-01-01&ate=2026-01-31").GET().build());
-
-            assertThat(response.body())
-                    .contains("\"path\":\"/api/v1/conta/extrato\"")
-                    .contains("\"query\":\"de=2026-01-01&ate=2026-01-31\"");
-        }
-
-        @Test
-        @DisplayName("o corpo atravessa íntegro")
-        void preservesBody() throws Exception {
-            String payload = "{\"valor\":10.5,\"descricao\":\"acentuação e \\\"aspas\\\"\"}";
-
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/extrato/busca")
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload))
-                    .build());
-
-            assertThat(response.body()).contains("\"bodyLength\":" + payload.getBytes().length);
-        }
-
-        @Test
-        @DisplayName("o status de erro do BFF é repassado sem interpretação")
-        void relaysBackendErrorStatus() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/__status/503").GET().build());
-
-            assertThat(response.statusCode()).isEqualTo(503);
-        }
+    private static MockHttpServletRequest request(String method, String uri) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, uri);
+        request.setRemoteAddr("10.1.2.3");
+        return request;
     }
 
     @Nested
-    @DisplayName("cenário 2 — a matriz decide o que é verificado")
-    class InterceptionMatrix {
+    @DisplayName("classificação da requisição")
+    class RequestClassification {
 
         @Test
-        @DisplayName("rota fora da matriz atravessa sem verificação")
-        void routeOutsideMatrixPassesThrough() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo").GET().build());
+        @DisplayName("rota fora da matriz é encaminhada")
+        void passthroughIsForwarded() throws Exception {
+            filter.doFilter(request("GET", BALANCE), new MockHttpServletResponse(), chain);
 
-            assertThat(response.statusCode()).isEqualTo(200);
-            assertThat(BACKEND.receivedRequests()).isEqualTo(1);
+            verify(forwarder).forward(any(), any());
         }
 
         /**
-         * Rota interceptada não alcança o BFF, aconteça o que acontecer com a
-         * jornada. O contador é a asserção que separa "barrou" de "barrou depois
-         * de encaminhar".
-         * <p>
-         * Sem token do canal, o sidecar recusa antes de chamar o gateway — que
-         * aqui não existe. É o cenário que isola a decisão de rota do
-         * comportamento da jornada.
+         * A requisição de negócio morre aqui: sem estado, não há onde segurá-la
+         * enquanto a confirmação acontece. O canal a refaz depois.
          */
         @Test
-        @DisplayName("rota interceptada sem token do canal é barrada e não alcança o BFF")
-        void interceptedRouteWithoutTokenIsBlockedAndNeverReachesBackend() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/pix/transferencia")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"valor\":50}"))
-                    .build());
+        @DisplayName("rota interceptada dispara a jornada e não chega ao BFF")
+        void interceptedRouteStartsJourneyAndIsNotForwarded() throws Exception {
+            when(journeyClient.start(any(), any())).thenReturn(challenge());
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.statusCode()).isEqualTo(401);
-            assertThat(response.body()).contains("session_required");
-            assertThat(BACKEND.receivedRequests()).isZero();
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(401);
+            verify(journeyClient).start(eq(CHANNEL_TOKEN), any());
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        @Test
+        @DisplayName("path malformado é recusado e não chega ao BFF")
+        void malformedPathIsRejectedAndNotForwarded() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request("POST", "/api/v1/pix/../pix/transferencia"), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(400);
+            verify(forwarder, never()).forward(any(), any());
         }
 
         /**
-         * Com token, o sidecar tenta a jornada. O gateway configurado não existe,
-         * então o desfecho é indisponibilidade — e o que importa é que a
-         * requisição continua não alcançando o BFF.
-         * <p>
-         * Fail-closed: falha de dependência nunca libera a requisição.
+         * O método faz parte da chave: o mesmo path com verbo fora da regra é
+         * encaminhado sem verificação.
          */
         @Test
-        @DisplayName("gateway indisponível não libera a rota interceptada")
-        void unavailableGatewayDoesNotReleaseInterceptedRoute() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/pix/transferencia")
-                    .header("x-canal-autenticacao", "eyJhbGciOiJIUzI1NiJ9.token.assinatura")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"valor\":50}"))
-                    .build());
+        @DisplayName("mesmo path com verbo fora da regra é encaminhado")
+        void undeclaredMethodIsForwarded() throws Exception {
+            filter.doFilter(request("GET", PIX_TRANSFER), new MockHttpServletResponse(), chain);
 
-            assertThat(response.statusCode()).isEqualTo(503);
-            assertThat(response.body()).contains("authorization_unavailable");
-            assertThat(BACKEND.receivedRequests()).isZero();
-        }
-
-        /**
-         * O mesmo endereço com verbos diferentes e desfechos opostos: listar as
-         * próprias chaves é consulta, cadastrar uma nova redireciona dinheiro.
-         */
-        @Test
-        @DisplayName("o verbo muda o desfecho no mesmo endereço")
-        void methodChangesOutcomeOnSamePath() throws Exception {
-            HttpResponse<String> listing = send(toSidecar("/api/v1/pix/chaves").GET().build());
-            assertThat(listing.statusCode()).isEqualTo(200);
-
-            BACKEND.resetCounter();
-
-            HttpResponse<String> registration = send(toSidecar("/api/v1/pix/chaves")
-                    .POST(HttpRequest.BodyPublishers.ofString("{}"))
-                    .build());
-
-            // Sem token do canal: barrado antes de qualquer chamada ao gateway.
-            assertThat(registration.statusCode()).isEqualTo(401);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            verify(forwarder).forward(any(), any());
         }
     }
 
     @Nested
-    @DisplayName("cenário 3 — variação de escrita não contorna a matriz")
-    class PathVariations {
+    @DisplayName("jornada em rota interceptada")
+    class Journey {
 
+        /**
+         * Os callbacks vão como vieram do gateway, e o identificador da jornada
+         * acompanha — o canal precisa dele para continuar.
+         */
         @Test
-        @DisplayName("barra final não contorna a interceptação")
-        void trailingSlashDoesNotBypass() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/pix/transferencia/")
-                    .POST(HttpRequest.BodyPublishers.noBody()).build());
+        @DisplayName("o desafio é devolvido ao canal com o identificador da jornada")
+        void challengeIsReturnedWithJourneyIdentifier() throws Exception {
+            when(journeyClient.start(any(), any())).thenReturn(challenge());
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.statusCode()).isEqualTo(401);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(401);
+            assertThat(response.getContentAsString())
+                    .contains("challenge_required")
+                    .contains(AUTH_ID)
+                    .contains("CHALLENGE_REQUIRED");
         }
 
+        /**
+         * Sem token não há quem autenticar, e chamar o gateway teria desfecho
+         * conhecido.
+         */
         @Test
-        @DisplayName("barras repetidas não contornam a interceptação")
-        void duplicatedSlashesDoNotBypass() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api//v1/pix/transferencia")
-                    .POST(HttpRequest.BodyPublishers.noBody()).build());
+        @DisplayName("rota interceptada sem token do canal não chama o gateway")
+        void missingChannelTokenDoesNotCallGateway() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.statusCode()).isEqualTo(401);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            filter.doFilter(request("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(401);
+            assertThat(response.getContentAsString()).contains("session_required");
+            verify(journeyClient, never()).start(any(), any());
         }
 
+        /**
+         * O código encurta a jornada. É repassado sem que o sidecar o
+         * interprete.
+         */
         @Test
-        @DisplayName("percent-encoding não contorna a interceptação")
-        void percentEncodingDoesNotBypass() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/%70ix/transferencia")
-                    .POST(HttpRequest.BodyPublishers.noBody()).build());
+        @DisplayName("o código do autenticador é repassado quando o canal o apresenta")
+        void authenticatorCodeIsForwarded() throws Exception {
+            when(journeyClient.start(any(), any())).thenReturn(challenge());
 
-            assertThat(response.statusCode()).isEqualTo(401);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            MockHttpServletRequest request = authenticated("POST", PIX_TRANSFER);
+            request.addHeader(CODE_HEADER, "149707");
+
+            filter.doFilter(request, new MockHttpServletResponse(), chain);
+
+            verify(journeyClient).start(CHANNEL_TOKEN, "149707");
         }
 
+        /**
+         * {@code 403} e não {@code 401}: o cliente autenticou e não pode. O
+         * canal trata os dois de formas diferentes — um abre a tela de
+         * confirmação, o outro mostra erro.
+         */
         @Test
-        @DisplayName("navegação de diretório é recusada e não alcança o BFF")
-        void directoryTraversalIsRejected() throws Exception {
-            HttpResponse<String> response = send(
-                    toSidecar("/api/v1/pix/../pix/transferencia")
-                            .POST(HttpRequest.BodyPublishers.noBody()).build());
+        @DisplayName("jornada negada vira 403 e não alcança o BFF")
+        void deniedJourneyIsForbidden() throws Exception {
+            when(journeyClient.start(any(), any()))
+                    .thenReturn(JourneyOutcome.denied("Biometria recusada"));
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.statusCode()).isEqualTo(400);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(403);
+            verify(forwarder, never()).forward(any(), any());
         }
 
+        /**
+         * O motivo da recusa fica no log: informar qual fator falhou ajuda quem
+         * sonda a mapear o comportamento.
+         */
         @Test
-        @DisplayName("separador codificado é recusado")
-        void encodedSeparatorIsRejected() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api%2Fv1/pix/transferencia")
-                    .POST(HttpRequest.BodyPublishers.noBody()).build());
+        @DisplayName("a resposta de recusa não revela qual fator falhou")
+        void denialDoesNotRevealFailedFactor() throws Exception {
+            when(journeyClient.start(any(), any()))
+                    .thenReturn(JourneyOutcome.denied("Biometria recusada"));
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.statusCode()).isEqualTo(400);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getContentAsString()).doesNotContain("Biometria");
+        }
+
+        /**
+         * Nada foi negado — a sessão apenas expirou. O canal precisa reabrir a
+         * jornada, e não mostrar erro.
+         */
+        @Test
+        @DisplayName("sessão expirada tem código próprio, distinto de recusa")
+        void expiredJourneyHasItsOwnCode() throws Exception {
+            when(journeyClient.start(any(), any())).thenReturn(JourneyOutcome.expired());
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(401);
+            assertThat(response.getContentAsString()).contains("journey_expired");
+        }
+
+        /**
+         * Indisponibilidade não é recusa. O status precisa dizer isso, senão
+         * ninguém investiga — e uma falha de infraestrutura fica escondida atrás
+         * de mensagens de autenticação negada.
+         */
+        @Test
+        @DisplayName("gateway indisponível vira 503 e não encaminha")
+        void unavailableGatewayIsServiceUnavailable() throws Exception {
+            when(journeyClient.start(any(), any())).thenThrow(
+                    new AuthenticationJourneyClient.JourneyUnavailableException("fora do ar"));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(503);
+            assertThat(response.getContentAsString()).contains("authorization_unavailable");
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        /**
+         * Rota fora da matriz não custa uma chamada ao gateway — o tráfego comum
+         * é a maior parte do volume.
+         */
+        @Test
+        @DisplayName("rota fora da matriz não chama o gateway")
+        void passthroughDoesNotCallGateway() throws Exception {
+            filter.doFilter(authenticated("GET", BALANCE), new MockHttpServletResponse(), chain);
+
+            verify(journeyClient, never()).start(any(), any());
+            verify(forwarder).forward(any(), any());
         }
     }
 
     @Nested
-    @DisplayName("cenário 4 — headers")
-    class Headers {
+    @DisplayName("continuação da jornada")
+    class ChallengeEndpoint {
 
-        /**
-         * A garantia que sustenta o controle. Se o header reservado atravessasse,
-         * o canal declararia por conta própria que a confirmação aconteceu.
-         */
-        @Test
-        @DisplayName("header reservado enviado pelo canal não alcança o BFF")
-        void reservedHeaderFromChannelDoesNotReachBackend() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo")
-                    .header("x-sidecar-verified", "true")
-                    .GET().build());
-
-            assertThat(response.body()).doesNotContain("x-sidecar-verified");
+        private MockHttpServletRequest challengeRequest(String body) {
+            MockHttpServletRequest request = authenticated("POST", CHALLENGE_PATH);
+            request.setContentType("application/json");
+            request.setContent(body.getBytes(StandardCharsets.UTF_8));
+            return request;
         }
 
-        @Test
-        @DisplayName("header de aplicação chega intacto ao BFF")
-        void applicationHeaderReachesBackend() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo")
-                    .header("X-Canal-Origem", "superapp")
-                    .GET().build());
-
-            assertThat(response.body()).contains("\"x-canal-origem\":[\"superapp\"]");
+        private static String answerWith(String authId) {
+            return "{\"authId\":\"" + authId + "\","
+                    + "\"callbacks\":[{\"type\":\"NameCallback\","
+                    + "\"input\":[{\"name\":\"IDToken1\",\"value\":\"resposta\"}]}]}";
         }
 
         /**
-         * O IP real do cliente é o dado usado em investigação de fraude: precisa
-         * chegar ao BFF uma vez só, com a cadeia inteira.
+         * O endpoint é do sidecar, não do BFF. Encaminhá-lo produziria
+         * {@code 404} e o canal ficaria sem saber por quê.
          */
         @Test
-        @DisplayName("a cadeia de encaminhamento chega com um único valor")
-        void forwardedChainArrivesOnce() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo")
-                    .header("X-Forwarded-For", "203.0.113.9")
-                    .GET().build());
+        @DisplayName("é tratado pelo sidecar e nunca encaminhado")
+        void isHandledBySidecarNeverForwarded() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
 
-            assertThat(response.body())
-                    .containsPattern("\"x-forwarded-for\":\\[\"203\\.0\\.113\\.9, [^\"]+\"\\]");
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)),
+                    new MockHttpServletResponse(), chain);
+
+            verify(forwarder, never()).forward(any(), any());
+            verify(journeyClient).advance(eq(AUTH_ID), any());
+        }
+
+        /**
+         * Sem normalizar, uma variação de escrita cairia na matriz como tráfego
+         * comum e seria encaminhada ao BFF, que não tem este endpoint.
+         */
+        @Test
+        @DisplayName("variação de escrita do path continua sendo tratada")
+        void pathVariationIsStillHandled() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+
+            MockHttpServletRequest request = authenticated("POST", CHALLENGE_PATH + "/");
+            request.setContentType("application/json");
+            request.setContent(answerWith(AUTH_ID).getBytes(StandardCharsets.UTF_8));
+
+            filter.doFilter(request, new MockHttpServletResponse(), chain);
+
+            verify(journeyClient).advance(any(), any());
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        /**
+         * O gateway espera os callbacks de volta como os enviou. Alterar
+         * estrutura, ordem ou campos de saída quebra a jornada.
+         */
+        @Test
+        @DisplayName("os callbacks são repassados sem interpretação")
+        void callbacksArePassedThroughUntouched() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)),
+                    new MockHttpServletResponse(), chain);
+
+            verify(journeyClient).advance(AUTH_ID, List.of(Map.of(
+                    "type", "NameCallback",
+                    "input", List.of(Map.of("name", "IDToken1", "value", "resposta")))));
         }
 
         @Test
-        @DisplayName("header hop-by-hop não alcança o BFF")
-        void hopByHopHeaderDoesNotReachBackend() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo")
-                    .header("TE", "trailers")
-                    .GET().build());
+        @DisplayName("o próximo desafio é devolvido ao canal")
+        void nextChallengeIsReturned() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.body()).doesNotContain("\"te\":");
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(401);
+            assertThat(response.getContentAsString())
+                    .contains("challenge_required")
+                    .contains(AUTH_ID);
+        }
+
+        @Test
+        @DisplayName("jornada concluída devolve autorização ao canal")
+        void completedJourneyReturnsAuthorized() throws Exception {
+            when(journeyClient.advance(any(), any()))
+                    .thenReturn(JourneyOutcome.completed(
+                            new JourneyStep(null, List.of(), "sessao-emitida")));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(200);
+            assertThat(response.getContentAsString()).contains("authorized");
+        }
+
+        /**
+         * A sessão emitida pelo gateway é credencial. O canal recebe apenas a
+         * confirmação de que a jornada concluiu.
+         */
+        @Test
+        @DisplayName("a sessão emitida não é devolvida ao canal")
+        void issuedSessionIsNotReturnedToChannel() throws Exception {
+            when(journeyClient.advance(any(), any()))
+                    .thenReturn(JourneyOutcome.completed(
+                            new JourneyStep(null, List.of(), "sessao-emitida")));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getContentAsString()).doesNotContain("sessao-emitida");
+        }
+
+        /**
+         * Sem identificador não há jornada a continuar, e chamar o gateway teria
+         * desfecho conhecido.
+         */
+        @Test
+        @DisplayName("resposta sem identificador de jornada não chama o gateway")
+        void answerWithoutJourneyIdentifierDoesNotCallGateway() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest("{\"callbacks\":[]}"), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(400);
+            verify(journeyClient, never()).advance(any(), any());
+        }
+
+        @Test
+        @DisplayName("corpo ilegível é recusado sem chamar o gateway")
+        void unreadableBodyIsRejected() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest("isso nao e json"), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(400);
+            verify(journeyClient, never()).advance(any(), any());
+        }
+
+        /**
+         * Método diferente não é resposta a desafio. Recusar evita que uma sonda
+         * com GET no endpoint produza chamada ao gateway.
+         */
+        @Test
+        @DisplayName("método diferente de POST não chama o gateway")
+        void otherMethodsDoNotCallGateway() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(authenticated("GET", CHALLENGE_PATH), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(405);
+            verify(journeyClient, never()).advance(any(), any());
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        @Test
+        @DisplayName("gateway indisponível vira 503")
+        void unavailableGatewayIsServiceUnavailable() throws Exception {
+            when(journeyClient.advance(any(), any())).thenThrow(
+                    new AuthenticationJourneyClient.JourneyUnavailableException("fora do ar"));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(503);
         }
     }
 
     @Nested
-    @DisplayName("cenário 5 — rastreabilidade")
+    @DisplayName("enquadramento verificado antes da matriz")
+    class FramingCheckedFirst {
+
+        /**
+         * A ordem importa: se o sidecar e o BFF podem discordar sobre onde a
+         * requisição termina, discutir qual rota ela é já não faz sentido — e
+         * numa rota interceptada a verificação tardia custaria uma chamada ao
+         * gateway antes da recusa.
+         */
+        @Test
+        @DisplayName("enquadramento ambíguo é recusado antes de resolver a rota")
+        void ambiguousFramingIsRejectedBeforeRouting() throws Exception {
+            when(forwarder.framingRejection(any()))
+                    .thenReturn(Optional.of(RequestForwarder.RejectionReason.AMBIGUOUS_FRAMING));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(400);
+            verify(journeyClient, never()).start(any(), any());
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        @Test
+        @DisplayName("corpo declarado acima do teto vira 413")
+        void oversizedDeclaredBodyBecomesPayloadTooLarge() throws Exception {
+            when(forwarder.framingRejection(any()))
+                    .thenReturn(Optional.of(RequestForwarder.RejectionReason.PAYLOAD_TOO_LARGE));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request("POST", BALANCE), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(413);
+        }
+    }
+
+    @Nested
+    @DisplayName("falhas do encaminhamento")
+    class ForwardingFailures {
+
+        /**
+         * BFF fora do ar é falha de dependência, não erro do chamador — e o
+         * corpo não revela endereço nem porta.
+         */
+        @Test
+        @DisplayName("BFF indisponível vira 502 sem detalhar a causa")
+        void upstreamFailureBecomesBadGateway() throws Exception {
+            doThrow(new RequestForwarder.UpstreamException("falhou", new RuntimeException()))
+                    .when(forwarder).forward(any(), any());
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request("GET", BALANCE), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(502);
+            assertThat(response.getContentAsString())
+                    .doesNotContain("127.0.0.1")
+                    .doesNotContain("8081");
+        }
+
+        @Test
+        @DisplayName("corpo acima do teto durante a transferência vira 413")
+        void oversizedActualBodyBecomesPayloadTooLarge() throws Exception {
+            doThrow(new RequestForwarder.PayloadTooLargeException())
+                    .when(forwarder).forward(any(), any());
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request("GET", BALANCE), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(413);
+        }
+    }
+
+    @Nested
+    @DisplayName("rastreabilidade")
     class Traceability {
 
         @Test
         @DisplayName("toda resposta carrega o identificador de correlação")
         void everyResponseCarriesCorrelationId() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo").GET().build());
+            when(journeyClient.start(any(), any())).thenReturn(challenge());
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.headers().firstValue(CorrelationId.HEADER)).isPresent();
+            filter.doFilter(authenticated("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getHeader(CorrelationId.HEADER)).isNotBlank();
         }
 
         @Test
         @DisplayName("o identificador enviado pelo canal é propagado")
         void incomingCorrelationIdIsPropagated() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo")
-                    .header(CorrelationId.HEADER, "chamado-4711")
-                    .GET().build());
+            MockHttpServletRequest request = request("GET", BALANCE);
+            request.addHeader(CorrelationId.HEADER, "chamado-4711");
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.headers().firstValue(CorrelationId.HEADER)).contains("chamado-4711");
+            filter.doFilter(request, response, chain);
+
+            assertThat(response.getHeader(CorrelationId.HEADER)).isEqualTo("chamado-4711");
         }
 
         /**
-         * Valor com caractere fora do formato permitiria escrever registro falso
-         * dentro do arquivo de log. É substituído sem aviso.
+         * É o que liga um chamado de suporte a uma linha de log. Sem ele na
+         * resposta de erro, a investigação começa por horário aproximado.
          */
-        @Test
-        @DisplayName("identificador que contaminaria o log é substituído")
-        void logPollutingCorrelationIdIsReplaced() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/saldo")
-                    .header(CorrelationId.HEADER, "abc.def")
-                    .GET().build());
-
-            assertThat(response.headers().firstValue(CorrelationId.HEADER))
-                    .isPresent()
-                    .get().asString().isNotEqualTo("abc.def").matches("[A-Za-z0-9_-]+");
-        }
-
         @Test
         @DisplayName("a resposta de erro carrega o identificador no corpo")
         void errorBodyCarriesCorrelationId() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/api/v1/pix/transferencia")
-                    .POST(HttpRequest.BodyPublishers.noBody()).build());
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            assertThat(response.body()).contains("correlationId");
+            filter.doFilter(request("POST", PIX_TRANSFER), response, chain);
+
+            assertThat(response.getContentAsString())
+                    .contains("correlationId")
+                    .contains(response.getHeader(CorrelationId.HEADER));
         }
 
         /**
-         * O endpoint de resposta ao desafio é do sidecar. Precisa ser tratado
-         * aqui, nunca encaminhado ao BFF — que não o tem.
+         * Detalhar qual verificação falhou ajudaria quem está sondando a
+         * descobrir o comportamento por tentativa e erro.
          */
         @Test
-        @DisplayName("o endpoint de desafio não é encaminhado ao BFF")
-        void challengeEndpointIsNotForwarded() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/ciam/challenge")
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"callbacks\":[]}"))
-                    .build());
+        @DisplayName("a resposta de erro não detalha o motivo interno")
+        void errorBodyDoesNotLeakInternals() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
 
-            // Sem identificador de jornada: recusado antes de chamar o gateway.
-            assertThat(response.statusCode()).isEqualTo(400);
-            assertThat(BACKEND.receivedRequests()).isZero();
-        }
-    }
+            filter.doFilter(request("POST", "/api/v1/pix/../x"), response, chain);
 
-    @Nested
-    @DisplayName("cenário 6 — limites e falhas")
-    class LimitsAndFailures {
-
-        @Test
-        @DisplayName("corpo acima do teto é recusado e não alcança o BFF")
-        void oversizedBodyIsRejected() throws Exception {
-            String payload = "x".repeat(2048);
-
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/extrato/busca")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build());
-
-            assertThat(response.statusCode()).isEqualTo(413);
-            assertThat(BACKEND.receivedRequests()).isZero();
+            assertThat(response.getContentAsString())
+                    .doesNotContain("MALFORMED_PATH")
+                    .doesNotContain("normaliz");
         }
 
         @Test
-        @DisplayName("corpo dentro do teto atravessa")
-        void bodyWithinLimitPassesThrough() throws Exception {
-            String payload = "x".repeat(512);
+        @DisplayName("a continuação não exige o token do canal")
+        void continuationDoesNotRequireChannelToken() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
 
-            HttpResponse<String> response = send(toSidecar("/api/v1/conta/extrato/busca")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build());
+            MockHttpServletRequest request = request("POST", CHALLENGE_PATH);
+            request.setContentType("application/json");
+            request.setContent(ChallengeEndpoint.answerWith(AUTH_ID).getBytes(StandardCharsets.UTF_8));
 
-            assertThat(response.statusCode()).isEqualTo(200);
-            assertThat(response.body()).contains("\"bodyLength\":512");
-        }
+            filter.doFilter(request, new MockHttpServletResponse(), chain);
 
-        /**
-         * BFF que não responde no prazo vira falha de dependência, e o corpo
-         * devolvido não revela endereço nem porta do backend.
-         */
-        @Test
-        @DisplayName("BFF lento vira 502 sem revelar o endereço interno")
-        void slowBackendBecomesBadGateway() throws Exception {
-            HttpResponse<String> response = send(toSidecar("/__slow").GET().build());
-
-            assertThat(response.statusCode()).isEqualTo(502);
-            assertThat(response.body())
-                    .doesNotContain("127.0.0.1")
-                    .doesNotContain(String.valueOf(BACKEND.port()));
+            verify(journeyClient).advance(eq(AUTH_ID), any());
         }
     }
 }
