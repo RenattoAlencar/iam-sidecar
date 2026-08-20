@@ -63,6 +63,25 @@ import java.time.Duration;
  *                       Configuração e não constante por isso. Errar o nome faz
  *                       o AM ignorar a sessão e responder a tela de login em vez
  *                       do código, o que não parece erro de configuração.
+ * @param channelTokenHeader nome do cabeçalho pelo qual o token do canal é
+ *                       apresentado ao gateway.
+ *                       <p>
+ *                       Configuração e não constante por dois motivos. O
+ *                       primeiro é que é acordo com outra equipe, e acordo muda
+ *                       sem que o comportamento do componente mude. O segundo é
+ *                       que nomes de cabeçalho carregam identificação da
+ *                       organização, e mantê-los fora do código evita que
+ *                       cheguem ao repositório.
+ *                       <p>
+ *                       Sem padrão: um valor inventado produz recusa do gateway
+ *                       idêntica à de token ausente, e o diagnóstico aponta para
+ *                       o token em vez de para a configuração.
+ * @param authenticatorCodeHeader nome do cabeçalho pelo qual o código de um
+ *                       autenticador já configurado é apresentado.
+ *                       <p>
+ *                       Opcional. Vazio, o sidecar nunca envia o código — o que
+ *                       é correto num ambiente onde esse atalho da jornada não
+ *                       existe.
  * @param connectTimeout limite para estabelecer conexão com o gateway.
  * @param readTimeout    limite para a resposta do gateway.
  *                       <p>
@@ -108,6 +127,13 @@ public record IdentityProperties(
                 + "da instalação do AM")
         String sessionCookieName,
 
+        @NotBlank(message = "identity.channel-token-header é obrigatório e não tem padrão: "
+                + "nome errado produz recusa idêntica à de token ausente")
+        String channelTokenHeader,
+
+        @DefaultValue("")
+        String authenticatorCodeHeader,
+
         @DefaultValue("2s")
         @NotNull(message = "identity.connect-timeout é obrigatório")
         Duration connectTimeout,
@@ -118,6 +144,8 @@ public record IdentityProperties(
 ) {
 
     public IdentityProperties {
+        authenticatorCodeHeader = authenticatorCodeHeader == null ? "" : authenticatorCodeHeader;
+
         requireSecureTransport(baseUrl);
         requirePositive(connectTimeout, "identity.connect-timeout");
         requirePositive(readTimeout, "identity.read-timeout");
@@ -168,9 +196,12 @@ public record IdentityProperties(
     public String toString() {
         return ("IdentityProperties[baseUrl=%s, realm=%s, journey=%s, journeyType=%s, "
                 + "clientId=%s, clientSecret=***, redirectUri=%s, scopes=%s, "
-                + "sessionCookieName=%s, connectTimeout=%s, readTimeout=%s]")
+                + "sessionCookieName=%s, channelTokenHeader=%s, authenticatorCodeHeader=%s, "
+                + "connectTimeout=%s, readTimeout=%s]")
                 .formatted(baseUrl, realm, journey, journeyType,
                         clientId, redirectUri, scopes,
-                        sessionCookieName, connectTimeout, readTimeout);
+                        sessionCookieName, channelTokenHeader,
+                        authenticatorCodeHeader.isBlank() ? "não configurado" : authenticatorCodeHeader,
+                        connectTimeout, readTimeout);
     }
 }

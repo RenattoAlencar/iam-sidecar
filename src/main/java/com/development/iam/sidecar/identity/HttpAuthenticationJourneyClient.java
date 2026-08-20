@@ -24,9 +24,12 @@ import java.util.Map;
  *
  * Accept-API-Version: resource=2.1
  * Content-Type: application/json
- * x-batata-authentication: {token do canal}     ← apenas no início
- * x-batata-token: {código OTP}                  ← apenas no início, se houver
+ * {channel-token-header}: {token do canal}     ← apenas no início
+ * {authenticator-code-header}: {código}        ← apenas no início, se houver
  * </pre>
+ * Os nomes dos dois últimos vêm de configuração: são acordo com outra equipe, e
+ * mantê-los fora do código evita que identificação da organização chegue ao
+ * repositório.
  * O path é forma da API do provedor e por isso vive aqui, não em configuração:
  * mudá-lo não seria ajuste de ambiente, seria outra integração.
  *
@@ -65,15 +68,6 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
     private static final String API_VERSION_HEADER = "Accept-API-Version";
     private static final String API_VERSION = "resource=2.1";
 
-    /**
-     * Headers pelos quais o canal apresenta suas credenciais ao gateway.
-     * <p>
-     * Constantes e não configuração: são os nomes que o gateway espera, e
-     * mudá-los exigiria mudança do outro lado — não é ajuste de ambiente.
-     */
-    private static final String CHANNEL_TOKEN_HEADER = "x-batata-authentication";
-    private static final String OTP_HEADER = "x-batata-token";
-
     private static final String INDEX_TYPE_PARAM = "authIndexType";
     private static final String INDEX_VALUE_PARAM = "authIndexValue";
 
@@ -101,12 +95,17 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
         }
 
         return execute("início", request -> {
-            request.header(CHANNEL_TOKEN_HEADER, channelToken);
+            request.header(properties.channelTokenHeader(), channelToken);
 
             // Presente e valido, o gateway pula o embarque e vai ao fator
             // seguinte. O sidecar nao decide nada sobre isso — apenas repassa.
-            if (otpCode != null && !otpCode.isBlank()) {
-                request.header(OTP_HEADER, otpCode);
+            //
+            // O nome do cabecalho pode nao estar configurado: e o caso de um
+            // ambiente onde esse atalho da jornada nao existe. Sem ele, o codigo
+            // simplesmente nao e enviado.
+            boolean codeConfigured = !properties.authenticatorCodeHeader().isBlank();
+            if (codeConfigured && otpCode != null && !otpCode.isBlank()) {
+                request.header(properties.authenticatorCodeHeader(), otpCode);
             }
             return EMPTY_BODY;
         });
@@ -129,11 +128,19 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
      * Compartilhado entre início e continuação porque a URL, os parâmetros e o
      * tratamento da resposta são idênticos — o que difere é o corpo e um
      * cabeçalho.
+     *
+     * <h3>Por que {@code exchange} e não {@code retrieve}</h3>
+     * O {@code retrieve} aplica o tratamento padrão de erro, que transforma
+     * qualquer status acima de {@code 400} em exceção — e aqui o {@code 401} e o
+     * {@code 408} são respostas normais que precisam ser lidas.
      * <p>
-     * O {@code onStatus} vazio desliga o tratamento padrão de erro do
-     * {@link RestClient}, que lançaria exceção para qualquer resposta acima de
-     * {@code 400}. Precisamos ler o {@code 401} e o {@code 408} como respostas
-     * válidas.
+     * Desligar esse tratamento com um manipulador de status vazio não funciona:
+     * o corpo é consumido durante a verificação e chega vazio na leitura
+     * seguinte, fazendo toda recusa parecer resposta sem detalhe.
+     * <p>
+     * O {@code exchange} entrega a resposta crua — status e corpo — sem nenhum
+     * tratamento no caminho. É o que permite distinguir recusa de
+     * indisponibilidade.
      */
     private JourneyOutcome execute(String stepName, RequestCustomizer customizer) {
         try {
@@ -148,16 +155,12 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
 
             Object body = customizer.customize(request);
 
-            var response = request
+            return request
                     .body(body)
-                    .retrieve()
-                    .onStatus(status -> true, (req, res) -> {
-                        // Nenhum status vira excecao aqui: a traducao acontece
-                        // abaixo, onde o corpo tambem esta disponivel.
-                    })
-                    .toEntity(String.class);
-
-            return translate(stepName, response.getStatusCode().value(), response.getBody());
+                    .exchange((outgoing, response) -> translate(
+                            stepName,
+                            response.getStatusCode().value(),
+                            response.bodyTo(String.class)));
 
         } catch (RestClientException e) {
             // A causa nao entra na mensagem: ela carrega o endereco do gateway e

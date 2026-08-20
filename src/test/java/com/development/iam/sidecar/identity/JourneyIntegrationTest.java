@@ -50,11 +50,46 @@ import static org.assertj.core.api.Assertions.assertThat;
 @EnabledIfEnvironmentVariable(named = "CHANNEL_TOKEN", matches = ".+")
 class JourneyIntegrationTest {
 
+    // --- Variáveis do passo 1 -------------------------------------------------
+
+    /** Endereço do gateway, incluindo o caminho base. Obrigatória. */
     private static final String BASE_URL = System.getenv("IDENTITY_BASE_URL");
-    private static final String REALM = envOrDefault("IDENTITY_REALM", "alpha");
-    private static final String JOURNEY = envOrDefault("IDENTITY_JOURNEY", "factor-onboarding");
+
+    /** JWT do usuário de homologação. Obrigatória; sem ela a classe é pulada. */
     private static final String CHANNEL_TOKEN = System.getenv("CHANNEL_TOKEN");
+
+    /** Realm do AM. */
+    private static final String REALM = envOrDefault("IDENTITY_REALM", "alpha");
+
+    /** Jornada a conduzir. */
+    private static final String JOURNEY = envOrDefault("IDENTITY_JOURNEY", "factor-onboarding");
+
+    /** Tipo do índice de autenticação. {@code service} para jornada nomeada. */
+    private static final String JOURNEY_TYPE = envOrDefault("IDENTITY_TYPE", "service");
+
+    /** Código de autenticador já configurado. Opcional — habilita um teste a mais. */
     private static final String OTP_CODE = System.getenv("OTP_CODE");
+
+    // --- Placeholders das chamadas seguintes ----------------------------------
+    // O passo 1 não usa nenhum destes. Ficam com valor fictício para satisfazer
+    // a validação de IdentityProperties, e serão preenchidos por variável quando
+    // a obtenção do código de autorização for exercitada.
+
+    private static final String CLIENT_ID_PLACEHOLDER = "nao-usado-no-passo-1";
+    private static final String CLIENT_SECRET_PLACEHOLDER = "nao-usado-no-passo-1";
+    private static final String REDIRECT_URI_PLACEHOLDER = "https://nao-usado-no-passo-1/callback";
+    private static final String SCOPES_PLACEHOLDER = "openid";
+    private static final String SESSION_COOKIE_PLACEHOLDER = "nao-usado-no-passo-1";
+
+    // --- Nomes dos cabeçalhos -------------------------------------------------
+    // Vêm de variável porque carregam identificação da organização e não devem
+    // chegar ao repositório.
+
+    /** Cabeçalho do token do canal. Obrigatória. */
+    private static final String CHANNEL_TOKEN_HEADER = System.getenv("IDENTITY_TOKEN_HEADER");
+
+    /** Cabeçalho do código do autenticador. Opcional. */
+    private static final String CODE_HEADER = envOrDefault("IDENTITY_CODE_HEADER", "");
 
     private AuthenticationJourneyClient client;
 
@@ -63,15 +98,35 @@ class JourneyIntegrationTest {
         return value == null || value.isBlank() ? fallback : value;
     }
 
+    /**
+     * Falha com mensagem clara quando uma variável obrigatória falta.
+     * <p>
+     * Sem isso o erro apareceria como {@link NullPointerException} dentro do
+     * {@code URI.create}, e a causa — variável não definida na configuração de
+     * execução — não estaria em lugar nenhum da mensagem.
+     */
+    private static void requireEnv(String value, String name) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(
+                    "Variável de ambiente " + name + " não definida. "
+                            + "Configurar na execução da IDE antes de rodar esta classe.");
+        }
+    }
+
     @BeforeEach
     void setUp() {
+        requireEnv(BASE_URL, "IDENTITY_BASE_URL");
+        requireEnv(CHANNEL_TOKEN_HEADER, "IDENTITY_TOKEN_HEADER");
+
         IdentityProperties properties = new IdentityProperties(
-                URI.create(BASE_URL), REALM, JOURNEY, "service",
-                envOrDefault("IDENTITY_CLIENT_ID", "nao-usado-neste-teste"),
-                envOrDefault("IDENTITY_CLIENT_SECRET", "nao-usado-neste-teste"),
-                envOrDefault("IDENTITY_REDIRECT_URI", "https://nao-usado/callback"),
-                envOrDefault("IDENTITY_SCOPES", "openid"),
-                envOrDefault("IDENTITY_SESSION_COOKIE_NAME", "nao-usado-neste-teste"),
+                URI.create(BASE_URL), REALM, JOURNEY, JOURNEY_TYPE,
+                CLIENT_ID_PLACEHOLDER,
+                CLIENT_SECRET_PLACEHOLDER,
+                REDIRECT_URI_PLACEHOLDER,
+                SCOPES_PLACEHOLDER,
+                SESSION_COOKIE_PLACEHOLDER,
+                CHANNEL_TOKEN_HEADER,
+                CODE_HEADER,
                 Duration.ofSeconds(5), Duration.ofSeconds(30));
 
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
@@ -87,7 +142,10 @@ class JourneyIntegrationTest {
 
         System.out.println("Gateway: " + BASE_URL);
         System.out.println("Realm:   " + REALM);
-        System.out.println("Jornada: " + JOURNEY);
+        System.out.println("Jornada: " + JOURNEY + " (tipo: " + JOURNEY_TYPE + ")");
+        System.out.println("Cabeçalho do token: " + CHANNEL_TOKEN_HEADER);
+        System.out.println("Token:   " + resumir(CHANNEL_TOKEN));
+        System.out.println("Código:  " + (OTP_CODE == null ? "não informado" : "informado"));
         System.out.println();
     }
 

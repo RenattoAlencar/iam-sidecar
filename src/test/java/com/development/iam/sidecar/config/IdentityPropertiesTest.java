@@ -31,7 +31,8 @@ class IdentityPropertiesTest {
     private static IdentityProperties properties(URI baseUrl) {
         return new IdentityProperties(baseUrl, "alpha", "factor-onboarding", "service",
                 "sidecar-client", CLIENT_SECRET, "https://canal.exemplo.com.br/callback",
-                "openid profile", "417726ee02928f6",
+                "openid profile", "cookie-de-sessao",
+                "x-canal-authentication", "x-canal-token",
                 Duration.ofSeconds(2), Duration.ofSeconds(10));
     }
 
@@ -95,7 +96,8 @@ class IdentityPropertiesTest {
         void rejectsNonPositiveReadTimeout() {
             assertThatThrownBy(() -> new IdentityProperties(GATEWAY, "alpha", "factor-onboarding",
                     "service", "sidecar-client", CLIENT_SECRET, "https://canal/callback",
-                    "openid", "417726ee02928f6", Duration.ofSeconds(2), Duration.ZERO))
+                    "openid", "cookie-de-sessao", "x-canal-authentication", "x-canal-token",
+                    Duration.ofSeconds(2), Duration.ZERO))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("read-timeout");
         }
@@ -105,7 +107,8 @@ class IdentityPropertiesTest {
         void rejectsNonPositiveConnectTimeout() {
             assertThatThrownBy(() -> new IdentityProperties(GATEWAY, "alpha", "factor-onboarding",
                     "service", "sidecar-client", CLIENT_SECRET, "https://canal/callback",
-                    "openid", "417726ee02928f6", Duration.ofSeconds(-1), Duration.ofSeconds(10)))
+                    "openid", "cookie-de-sessao", "x-canal-authentication", "x-canal-token",
+                    Duration.ofSeconds(-1), Duration.ofSeconds(10)))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("connect-timeout");
         }
@@ -151,7 +154,8 @@ class IdentityPropertiesTest {
                     "identity.client-id=sidecar-client",
                     "identity.client-secret=segredo",
                     "identity.redirect-uri=https://canal.exemplo.com.br/callback",
-                    "identity.session-cookie-name=417726ee02928f6"
+                    "identity.session-cookie-name=cookie-de-sessao",
+                    "identity.channel-token-header=x-canal-authentication"
             };
         }
 
@@ -184,7 +188,8 @@ class IdentityPropertiesTest {
                             "identity.client-id=sidecar-client",
                             "identity.client-secret=segredo",
                             "identity.redirect-uri=https://canal.exemplo.com.br/callback",
-                            "identity.session-cookie-name=417726ee02928f6")
+                            "identity.session-cookie-name=cookie-de-sessao",
+                            "identity.channel-token-header=x-canal-authentication")
                     .run(context -> assertThat(context).hasFailed());
         }
 
@@ -200,7 +205,8 @@ class IdentityPropertiesTest {
                             "identity.journey=factor-onboarding",
                             "identity.client-id=sidecar-client",
                             "identity.client-secret=segredo",
-                            "identity.session-cookie-name=417726ee02928f6")
+                            "identity.session-cookie-name=cookie-de-sessao",
+                            "identity.channel-token-header=x-canal-authentication")
                     .run(context -> assertThat(context).hasFailed());
         }
 
@@ -229,8 +235,40 @@ class IdentityPropertiesTest {
                             "identity.journey=factor-onboarding",
                             "identity.client-id=sidecar-client",
                             "identity.redirect-uri=https://canal.exemplo.com.br/callback",
-                            "identity.session-cookie-name=417726ee02928f6")
+                            "identity.session-cookie-name=cookie-de-sessao",
+                            "identity.channel-token-header=x-canal-authentication")
                     .run(context -> assertThat(context).hasFailed());
+        }
+
+        /**
+         * Nome errado produz recusa do gateway idêntica à de token ausente, e o
+         * diagnóstico aponta para o token em vez de para a configuração.
+         */
+        @Test
+        @DisplayName("nome do cabeçalho do token do canal ausente derruba o boot")
+        void failsWhenChannelTokenHeaderIsMissing() {
+            runner.withPropertyValues(
+                            "identity.base-url=https://ig-hml.exemplo.com.br/am",
+                            "identity.journey=factor-onboarding",
+                            "identity.client-id=sidecar-client",
+                            "identity.client-secret=segredo",
+                            "identity.redirect-uri=https://canal.exemplo.com.br/callback",
+                            "identity.session-cookie-name=cookie-de-sessao")
+                    .run(context -> assertThat(context).hasFailed());
+        }
+
+        /**
+         * O cabeçalho do código é opcional: há ambiente onde esse atalho da
+         * jornada não existe, e exigir o nome obrigaria a inventar um valor.
+         */
+        @Test
+        @DisplayName("nome do cabeçalho do código é opcional")
+        void authenticatorCodeHeaderIsOptional() {
+            runner.withPropertyValues(completeConfiguration()).run(context -> {
+                assertThat(context).hasNotFailed();
+                assertThat(context.getBean(IdentityProperties.class).authenticatorCodeHeader())
+                        .isEmpty();
+            });
         }
 
         @Test
@@ -242,7 +280,8 @@ class IdentityPropertiesTest {
                             "identity.client-id=sidecar-client",
                             "identity.client-secret=segredo",
                             "identity.redirect-uri=https://canal.exemplo.com.br/callback",
-                            "identity.session-cookie-name=417726ee02928f6")
+                            "identity.session-cookie-name=cookie-de-sessao",
+                            "identity.channel-token-header=x-canal-authentication")
                     .run(context -> assertThat(context).hasFailed());
         }
     }

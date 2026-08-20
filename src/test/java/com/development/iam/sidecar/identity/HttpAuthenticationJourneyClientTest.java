@@ -1,13 +1,7 @@
 package com.development.iam.sidecar.identity;
 
 import com.development.iam.sidecar.config.IdentityProperties;
-import com.github.tomakehurst.wiremock.WireMockServer;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
@@ -16,14 +10,6 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
-import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
-import static com.github.tomakehurst.wiremock.client.WireMock.absent;
-import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
-import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
-import static com.github.tomakehurst.wiremock.client.WireMock.post;
-import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
-import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
-import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -45,7 +31,15 @@ class HttpAuthenticationJourneyClientTest {
 
     private static final String AUTHENTICATE_PATH = "/am/json/realms/" + REALM + "/authenticate";
 
-    /** Passo 1: desafio de biometria. */
+    /**
+     * Nomes fictícios: os reais vêm de configuração e não pertencem ao código.
+     */
+    private static final String CHANNEL_TOKEN_HEADER = "x-canal-authentication";
+    private static final String CODE_HEADER = "x-canal-token";
+
+    /**
+     * Passo 1: desafio de biometria.
+     */
     private static final String BIOMETRIC_CHALLENGE = """
             {
               "authId": "%s",
@@ -64,7 +58,9 @@ class HttpAuthenticationJourneyClientTest {
             }
             """.formatted(AUTH_ID);
 
-    /** Passo 3: espera enquanto a análise biométrica não termina. */
+    /**
+     * Passo 3: espera enquanto a análise biométrica não termina.
+     */
     private static final String POLLING_WAIT = """
             {
               "authId": "%s",
@@ -80,7 +76,9 @@ class HttpAuthenticationJourneyClientTest {
             }
             """.formatted(AUTH_ID);
 
-    /** Resposta final: sessão emitida. */
+    /**
+     * Resposta final: sessão emitida.
+     */
     private static final String COMPLETED = """
             {
               "tokenId": "sessao-emitida-pelo-am",
@@ -112,7 +110,7 @@ class HttpAuthenticationJourneyClientTest {
                 URI.create("http://127.0.0.1:" + gateway.port() + "/am"),
                 REALM, JOURNEY, "service",
                 "sidecar-client", "segredo", "https://canal/callback", "openid",
-                "417726ee02928f6",
+                "cookie-de-sessao", CHANNEL_TOKEN_HEADER, CODE_HEADER,
                 Duration.ofSeconds(2), Duration.ofSeconds(2));
 
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
@@ -160,7 +158,7 @@ class HttpAuthenticationJourneyClientTest {
             client.start(CHANNEL_TOKEN, null);
 
             gateway.verify(postRequestedFor(urlPathEqualTo(AUTHENTICATE_PATH))
-                    .withHeader("x-batata-authentication", equalTo(CHANNEL_TOKEN))
+                    .withHeader(CHANNEL_TOKEN_HEADER, equalTo(CHANNEL_TOKEN))
                     .withHeader("Accept-API-Version", equalTo("resource=2.1")));
         }
 
@@ -204,7 +202,7 @@ class HttpAuthenticationJourneyClientTest {
             client.start(CHANNEL_TOKEN, OTP);
 
             gateway.verify(postRequestedFor(urlPathEqualTo(AUTHENTICATE_PATH))
-                    .withHeader("x-batata-token", equalTo(OTP)));
+                    .withHeader(CODE_HEADER, equalTo(OTP)));
         }
 
         @Test
@@ -215,7 +213,7 @@ class HttpAuthenticationJourneyClientTest {
             client.start(CHANNEL_TOKEN, null);
 
             gateway.verify(postRequestedFor(urlPathEqualTo(AUTHENTICATE_PATH))
-                    .withHeader("x-batata-token", absent()));
+                    .withHeader(CODE_HEADER, absent()));
         }
 
         @Test
@@ -290,7 +288,7 @@ class HttpAuthenticationJourneyClientTest {
             client.advance(AUTH_ID, answeredWithSelfie());
 
             gateway.verify(postRequestedFor(urlPathEqualTo(AUTHENTICATE_PATH))
-                    .withoutHeader("x-batata-authentication"));
+                    .withoutHeader(CHANNEL_TOKEN_HEADER));
         }
 
         /**
