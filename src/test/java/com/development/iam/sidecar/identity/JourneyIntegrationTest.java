@@ -3,8 +3,8 @@ package com.development.iam.sidecar.identity;
 import com.development.iam.sidecar.config.IdentityProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
@@ -24,103 +24,109 @@ import static org.assertj.core.api.Assertions.assertThat;
  * em qualquer um deles produz recusa do gateway que pareceria falha de
  * autenticação, e é melhor descobrir aqui do que no fluxo completo.
  *
+ * <h2>Valores preenchidos no código, e o que isso exige</h2>
+ * Os valores abaixo ficam no arquivo para facilitar a execução pela IDE, sem
+ * depender de configuração de execução. <strong>Isso é temporário e não pode
+ * chegar ao repositório:</strong> o token do canal é credencial, e credencial
+ * commitada permanece no histórico mesmo depois de removida.
+ * <p>
+ * Antes de qualquer commit, esvaziar o bloco de valores. Com ele vazio, a classe
+ * falha com mensagem explicando o que preencher — em vez de rodar contra
+ * endereço inválido e produzir erro sem sentido.
+ *
  * <h2>Não roda no pipeline</h2>
- * Depende de rede externa e de um usuário de homologação, e por isso só executa
- * quando as variáveis de ambiente estiverem presentes. Sem elas, o JUnit pula os
- * métodos em vez de falhar — teste que quebra o build por indisponibilidade de
- * um sistema de terceiro acaba desativado por quem precisa entregar.
- *
- * <h2>Como executar</h2>
- * Definir as variáveis e rodar a classe pela IDE:
- * <pre>
- * IDENTITY_BASE_URL   = https://ig-hml.exemplo.com.br/am
- * IDENTITY_REALM      = alpha
- * IDENTITY_JOURNEY    = factor-onboarding
- * CHANNEL_TOKEN       = <JWT do usuário de homologação>
- * </pre>
- * Opcional, para o cenário de autenticador já configurado:
- * <pre>
- * OTP_CODE            = 149707
- * </pre>
- *
- * <h2>O que não fica registrado</h2>
- * O identificador da jornada e o conteúdo dos callbacks aparecem parcialmente na
- * saída, para conferência manual. É aceitável em execução local com usuário de
- * homologação, e por isso esta classe nunca deve rodar contra produção.
+ * A anotação {@link Disabled} impede que o {@code mvn test} a execute. Depende
+ * de rede externa e de um usuário de homologação — teste que quebra o build por
+ * indisponibilidade de um sistema de terceiro acaba desativado por quem precisa
+ * entregar.
+ * <p>
+ * Para rodar, comente a anotação ou execute o método pela IDE, que ignora o
+ * {@code @Disabled} quando a execução é individual.
  */
-@EnabledIfEnvironmentVariable(named = "TEST_CHANNEL_TOKEN", matches = ".+")
+@Disabled("execução manual: depende do gateway de homologação e de credencial preenchida abaixo")
 class JourneyIntegrationTest {
 
     // ==========================================================================
-    // CONFIGURAÇÃO DO COMPONENTE
+    //  CONFIGURAÇÃO DO COMPONENTE
     //
-    // Correspondem a propriedades reais de IdentityProperties. Em produção vêm
-    // do arquivo de configuração e do values do ambiente.
+    //  Correspondem a propriedades reais de IdentityProperties. Em produção vêm
+    //  do arquivo de configuração e do values do ambiente.
     // ==========================================================================
 
-    /** Endereço do gateway, incluindo o caminho base. Obrigatória. */
-    private static final String BASE_URL = System.getenv("IDENTITY_BASE_URL");
+    /** Endereço do gateway, incluindo o caminho base. Sem barra no final. */
+    private static final String BASE_URL = "";
 
     /** Realm do AM. */
-    private static final String REALM = envOrDefault("IDENTITY_REALM", "alpha");
+    private static final String REALM = "alpha";
 
     /** Jornada a conduzir. */
-    private static final String JOURNEY = envOrDefault("IDENTITY_JOURNEY", "factor-onboarding");
+    private static final String JOURNEY = "factor-onboarding";
 
     /** Tipo do índice de autenticação. {@code service} para jornada nomeada. */
-    private static final String JOURNEY_TYPE = envOrDefault("IDENTITY_TYPE", "service");
+    private static final String JOURNEY_TYPE = "service";
+
+    /** Nome do cabeçalho pelo qual o token do canal é apresentado ao gateway. */
+    private static final String CHANNEL_TOKEN_HEADER = "";
+
+    /** Nome do cabeçalho do código do autenticador. Vazio desativa o envio. */
+    private static final String CODE_HEADER = "";
+
+    // ==========================================================================
+    //  VALORES QUE O CANAL ENVIARIA
+    //
+    //  Não são configuração de nada. Em produção o sidecar recebe estes valores
+    //  no cabeçalho e no corpo de cada requisição, e os repassa. Aqui não há
+    //  requisição chegando, e o teste faz o papel do canal.
+    //
+    //  ESVAZIAR ANTES DE COMMITAR.
+    // ==========================================================================
+
+    /** JWT do usuário de homologação. Expira em cerca de uma hora. */
+    private static final String CHANNEL_TOKEN = "";
+
+    /** Código de um autenticador já configurado. Vazio pula o teste do atalho. */
+    private static final String OTP_CODE = "";
 
     /**
-     * Nome do cabeçalho pelo qual o token do canal é apresentado. Obrigatória.
+     * Conteúdo da captura biométrica, como o canal o obtém.
      * <p>
-     * Vem de variável porque carrega identificação da organização e não deve
-     * chegar ao repositório.
+     * Vazio, o passo 2 envia um marcador e verifica apenas o formato da chamada:
+     * a biometria será reprovada, o que é resultado válido — significa que a
+     * requisição chegou ao ponto de ser analisada.
      */
-    private static final String CHANNEL_TOKEN_HEADER = System.getenv("IDENTITY_TOKEN_HEADER");
+    private static final String SELFIE = "";
 
-    /** Nome do cabeçalho do código do autenticador. Opcional. */
-    private static final String CODE_HEADER = envOrDefault("IDENTITY_CODE_HEADER", "");
+    /** Nome do usuário, como o canal o envia junto da captura. */
+    private static final String USER_NAME = "Usuario Teste";
+
+    /** Identificação do canal, como ele a envia junto da captura. */
+    private static final String CHANNEL_NAME = "TESTE";
 
     // ==========================================================================
-    // VALORES QUE O CANAL ENVIARIA
-    //
-    // Prefixo TEST_ de propósito: NÃO são configuração de nada. Em produção o
-    // sidecar recebe estes valores no cabeçalho de cada requisição e os
-    // repassa. Aqui não há requisição chegando, e o teste faz o papel do canal.
+    //  Não usados no passo 1 e 2. Preenchidos quando a obtenção do código de
+    //  autorização for exercitada.
     // ==========================================================================
 
-    /** JWT do usuário de homologação. Obrigatória; sem ela a classe é pulada. */
-    private static final String CHANNEL_TOKEN = System.getenv("TEST_CHANNEL_TOKEN");
+    private static final String CLIENT_ID = "nao-usado-ainda";
+    private static final String CLIENT_SECRET = "nao-usado-ainda";
+    private static final String REDIRECT_URI = "https://nao-usado-ainda/callback";
+    private static final String SCOPES = "openid";
+    private static final String SESSION_COOKIE_NAME = "nao-usado-ainda";
 
-    /** Código de autenticador já configurado. Opcional — habilita um teste a mais. */
-    private static final String OTP_CODE = System.getenv("TEST_OTP_CODE");
-
-    // --- Placeholders das chamadas seguintes ----------------------------------
-    // O passo 1 não usa nenhum destes. Ficam com valor fictício para satisfazer
-    // a validação de IdentityProperties, e serão preenchidos por variável quando
-    // a obtenção do código de autorização for exercitada.
-
-    private static final String CLIENT_ID_PLACEHOLDER = "nao-usado-no-passo-1";
-    private static final String CLIENT_SECRET_PLACEHOLDER = "nao-usado-no-passo-1";
-    private static final String REDIRECT_URI_PLACEHOLDER = "https://nao-usado-no-passo-1/callback";
-    private static final String SCOPES_PLACEHOLDER = "openid";
-    private static final String SESSION_COOKIE_PLACEHOLDER = "nao-usado-no-passo-1";
+    private AuthenticationJourneyClient client;
 
     @BeforeEach
     void setUp() {
-        requireEnv(BASE_URL, "IDENTITY_BASE_URL");
-        requireEnv(CHANNEL_TOKEN_HEADER, "IDENTITY_CHANNEL_TOKEN_HEADER");
-        requireEnv(CHANNEL_TOKEN_HEADER, "IDENTITY_TOKEN_HEADER");
+        requirePreenchido(BASE_URL, "BASE_URL", "endereço do gateway, terminando em /am");
+        requirePreenchido(CHANNEL_TOKEN_HEADER, "CHANNEL_TOKEN_HEADER",
+                "nome do cabeçalho do token do canal");
+        requirePreenchido(CHANNEL_TOKEN, "CHANNEL_TOKEN",
+                "JWT do usuário de homologação");
 
         IdentityProperties properties = new IdentityProperties(
                 URI.create(BASE_URL), REALM, JOURNEY, JOURNEY_TYPE,
-                CLIENT_ID_PLACEHOLDER,
-                CLIENT_SECRET_PLACEHOLDER,
-                REDIRECT_URI_PLACEHOLDER,
-                SCOPES_PLACEHOLDER,
-                SESSION_COOKIE_PLACEHOLDER,
-                CHANNEL_TOKEN_HEADER,
-                CODE_HEADER,
+                CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, SCOPES, SESSION_COOKIE_NAME,
+                CHANNEL_TOKEN_HEADER, CODE_HEADER,
                 Duration.ofSeconds(5), Duration.ofSeconds(30));
 
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
@@ -134,19 +140,33 @@ class JourneyIntegrationTest {
 
         client = new HttpAuthenticationJourneyClient(restClient, properties);
 
-        System.out.println("Gateway: " + BASE_URL);
-        System.out.println("Realm:   " + REALM);
-        System.out.println("Jornada: " + JOURNEY + " (tipo: " + JOURNEY_TYPE + ")");
+        System.out.println("Gateway:  " + BASE_URL);
+        System.out.println("Realm:    " + REALM);
+        System.out.println("Jornada:  " + JOURNEY + " (tipo: " + JOURNEY_TYPE + ")");
         System.out.println("Cabeçalho do token: " + CHANNEL_TOKEN_HEADER);
-        System.out.println("Token:   " + resumir(CHANNEL_TOKEN));
-        System.out.println("Código:  " + (OTP_CODE == null ? "não informado" : "informado"));
+        System.out.println("Token:    " + resumir(CHANNEL_TOKEN));
+        System.out.println("Captura:  " + (SELFIE.isBlank() ? "marcador" : resumir(SELFIE)));
         System.out.println();
     }
 
     /**
-     * Passo 1. O que se confirma aqui é o contrato inteiro do início: a URL
-     * montada, os parâmetros de consulta, o cabeçalho de versão e o nome do
-     * cabeçalho do token. Qualquer um errado produz recusa.
+     * Falha com mensagem clara quando um valor obrigatório está vazio.
+     * <p>
+     * Sem isso, {@code BASE_URL} vazia produziria erro dentro do
+     * {@code URI.create}, e a causa — bloco de valores não preenchido — não
+     * estaria em lugar nenhum da mensagem.
+     */
+    private static void requirePreenchido(String valor, String nome, String descricao) {
+        if (valor == null || valor.isBlank()) {
+            throw new IllegalStateException(
+                    "Preencher a constante " + nome + " no início desta classe: " + descricao);
+        }
+    }
+
+    /**
+     * Passo 1. Confirma o contrato inteiro do início: a URL montada, os
+     * parâmetros de consulta, o cabeçalho de versão e o nome do cabeçalho do
+     * token. Qualquer um errado produz recusa.
      */
     @Test
     @DisplayName("passo 1 — inicia a jornada e recebe o desafio de biometria")
@@ -170,46 +190,21 @@ class JourneyIntegrationTest {
     }
 
     /**
-     * O código encurta a jornada quando o cliente já tem autenticador
-     * configurado: o gateway pula o embarque e vai direto ao fator seguinte.
+     * Passo 2. Responde ao desafio enviando a captura no campo de entrada do
+     * callback recebido.
      * <p>
-     * Só executa quando {@code TEST_OTP_CODE} estiver definido — sem ele não há
-     * o que exercitar.
+     * O que se confirma é o formato da continuação: corpo com {@code authId} e
+     * os callbacks devolvidos como vieram, com o valor preenchido. Erro nisso
+     * produz recusa que pareceria biometria reprovada.
+     * <p>
+     * <strong>O desfecho da análise não é o que se testa.</strong> Sem uma
+     * captura que o serviço de biometria aprove, a análise é reprovada — e isso
+     * é resultado válido: significa que a chamada chegou ao ponto de ser
+     * analisada. O que não pode acontecer é falha de comunicação.
      */
     @Test
-    @DisplayName("passo 1 com código do autenticador — jornada encurtada")
-    @EnabledIfEnvironmentVariable(named = "TEST_OTP_CODE", matches = ".+")
-    void startsJourneyWithAuthenticatorCode() {
-        JourneyOutcome outcome = client.start(CHANNEL_TOKEN, OTP_CODE);
-
-        imprimir("PASSO 1 — início com código do autenticador", outcome);
-
-        assertThat(outcome.type())
-                .as("com código válido o gateway pula o embarque; com inválido, segue o "
-                        + "caminho completo. Os dois são desfecho de desafio")
-                .isIn(JourneyOutcome.Type.CHALLENGE, JourneyOutcome.Type.COMPLETED);
-    }
-
-    /**
-     * Passo 2. Responde ao desafio de biometria enviando a foto no campo de
-     * entrada do callback recebido.
-     * <p>
-     * O que se confirma aqui é o formato da continuação: o corpo com
-     * {@code authId} e os callbacks devolvidos como vieram, com o valor
-     * preenchido. Um erro nisso produz recusa do gateway que pareceria biometria
-     * reprovada.
-     * <p>
-     * <strong>O desfecho da análise não é o que se testa.</strong> Sem uma foto
-     * que a Unico aprove, a biometria é reprovada — e isso é resultado válido:
-     * significa que a chamada chegou ao ponto de ser analisada. O que não pode
-     * acontecer é falha de comunicação ou recusa antes da análise.
-     * <p>
-     * Com {@code SELFIE_BASE64} definida, exercita o caminho completo até o
-     * passo de espera; sem ela, usa um marcador e verifica só o formato.
-     */
-    @Test
-    @DisplayName("passo 2 — responde ao desafio com a foto e recebe o passo de espera")
-    void answersBiometricChallengeAndReceivesPolling() {
+    @DisplayName("passo 2 — responde ao desafio e recebe o passo seguinte")
+    void answersChallengeAndReceivesNextStep() {
         JourneyOutcome first = client.start(CHANNEL_TOKEN, null);
 
         assertThat(first.type())
@@ -217,23 +212,67 @@ class JourneyIntegrationTest {
                 .isEqualTo(JourneyOutcome.Type.CHALLENGE);
 
         String authId = first.step().authId();
-        List<Map<String, Object>> answered = answerWithSelfie(first.callbacks());
+        List<Map<String, Object>> answered = answerWithCapture(first.callbacks());
 
         JourneyOutcome second = client.advance(authId, answered);
 
-        imprimir("PASSO 2 — resposta ao desafio de biometria", second);
+        imprimir("PASSO 2 — resposta ao desafio", second);
 
         assertThat(second.type())
-                .as("recusa aqui costuma ser a foto reprovada, o que é resultado válido; "
+                .as("recusa aqui costuma ser a captura reprovada, o que é resultado válido; "
                         + "falha de comunicação seria exceção")
                 .isIn(JourneyOutcome.Type.CHALLENGE,
                         JourneyOutcome.Type.DENIED,
                         JourneyOutcome.Type.COMPLETED);
 
         if (second.type() == JourneyOutcome.Type.CHALLENGE) {
-            System.out.println("A jornada avançou. Tipo do próximo callback: "
+            System.out.println("A jornada avançou. Próximo callback: "
                     + second.callbacks().getFirst().get("type"));
         }
+    }
+
+    /**
+     * O código encurta a jornada quando o cliente já tem autenticador
+     * configurado: o gateway pula o embarque e vai direto ao fator seguinte.
+     * <p>
+     * Sem {@code OTP_CODE} e {@code CODE_HEADER} preenchidos, não há o que
+     * exercitar — o teste é encerrado sem falhar.
+     */
+    @Test
+    @DisplayName("passo 1 com código do autenticador — jornada encurtada")
+    void startsJourneyWithAuthenticatorCode() {
+        if (OTP_CODE.isBlank() || CODE_HEADER.isBlank()) {
+            System.out.println("OTP_CODE ou CODE_HEADER vazios: cenário do atalho não exercitado.");
+            return;
+        }
+
+        JourneyOutcome outcome = client.start(CHANNEL_TOKEN, OTP_CODE);
+
+        imprimir("PASSO 1 — início com código do autenticador", outcome);
+
+        assertThat(outcome.type())
+                .as("com código válido o gateway pula o embarque; com inválido, segue o "
+                        + "caminho completo")
+                .isIn(JourneyOutcome.Type.CHALLENGE, JourneyOutcome.Type.COMPLETED);
+    }
+
+    /**
+     * Confirma que o cliente traduz recusa em desfecho, e não em exceção.
+     * <p>
+     * É a distinção que faz o canal receber "não autorizado" em vez de "serviço
+     * fora do ar" quando a biometria é reprovada.
+     */
+    @Test
+    @DisplayName("token do canal inválido vira recusa, não indisponibilidade")
+    void invalidChannelTokenBecomesDenial() {
+        JourneyOutcome outcome = client.start(
+                "eyJhbGciOiJIUzI1NiJ9.token-invalido.assinatura-invalida", null);
+
+        imprimir("Token do canal inválido", outcome);
+
+        assertThat(outcome.type())
+                .as("o gateway respondeu; recusa não pode virar falha de comunicação")
+                .isEqualTo(JourneyOutcome.Type.DENIED);
     }
 
     /**
@@ -241,17 +280,16 @@ class JourneyIntegrationTest {
      * exatamente como veio.
      * <p>
      * O gateway espera o callback de volta na forma em que o enviou — alterar
-     * estrutura, ordem ou os campos de saída quebra a jornada, e o erro apareceria
-     * como recusa sem explicação.
-     * <p>
-     * O conteúdo é um JSON em texto com a foto, o nome e o canal, conforme o
-     * contrato da jornada.
+     * estrutura, ordem ou os campos de saída quebra a jornada, e o erro
+     * apareceria como recusa sem explicação.
      */
     @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> answerWithSelfie(
+    private static List<Map<String, Object>> answerWithCapture(
             List<Map<String, Object>> received) {
 
-        String payload = "{\"foto\":\"" + SELFIE_BASE64
+        String captura = SELFIE.isBlank() ? "captura-nao-fornecida" : SELFIE;
+
+        String payload = "{\"foto\":\"" + captura
                 + "\",\"nome\":\"" + USER_NAME
                 + "\",\"channel\":\"" + CHANNEL_NAME + "\"}";
 
@@ -274,25 +312,6 @@ class JourneyIntegrationTest {
                     return copy;
                 })
                 .toList();
-    }
-
-    /**
-     * Confirma que o cliente traduz recusa em desfecho, e não em exceção.
-     * <p>
-     * É a distinção que faz o canal receber "não autorizado" em vez de "serviço
-     * fora do ar" quando a biometria é reprovada.
-     */
-    @Test
-    @DisplayName("token do canal inválido vira recusa, não indisponibilidade")
-    void invalidChannelTokenBecomesDenial() {
-        JourneyOutcome outcome = client.start(
-                "eyJhbGciOiJIUzI1NiJ9.token-invalido.assinatura-invalida", null);
-
-        imprimir("Token do canal inválido", outcome);
-
-        assertThat(outcome.type())
-                .as("o gateway respondeu; recusa não pode virar falha de comunicação")
-                .isEqualTo(JourneyOutcome.Type.DENIED);
     }
 
     /**
@@ -331,7 +350,6 @@ class JourneyIntegrationTest {
         System.out.println();
     }
 
-    @SuppressWarnings("unchecked")
     private static void imprimirCampo(String rotulo, Object valor) {
         if (!(valor instanceof List<?> itens) || itens.isEmpty()) {
             return;
@@ -349,8 +367,8 @@ class JourneyIntegrationTest {
      * formato, sem imprimir uma credencial inteira na saída do console.
      */
     private static String resumir(String valor) {
-        if (valor.length() <= 24) {
-            return valor;
+        if (valor == null || valor.length() <= 24) {
+            return valor == null ? "(vazio)" : valor;
         }
         return valor.substring(0, 12) + "..." + valor.substring(valor.length() - 8)
                 + " (" + valor.length() + " caracteres)";
