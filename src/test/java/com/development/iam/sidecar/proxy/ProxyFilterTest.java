@@ -1,5 +1,6 @@
 package com.development.iam.sidecar.proxy;
 
+import com.development.iam.sidecar.config.ChannelProperties;
 import com.development.iam.sidecar.config.IdentityProperties;
 import com.development.iam.sidecar.config.InterceptRule;
 import com.development.iam.sidecar.identity.AuthenticationJourneyClient;
@@ -17,6 +18,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 import tools.jackson.databind.ObjectMapper;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +51,7 @@ class ProxyFilterTest {
     private static final String CODE_HEADER = "x-canal-codigo";
     private static final String CHANNEL_TOKEN = "eyJhbGciOiJIUzI1NiJ9.token-do-canal";
     private static final String AUTH_ID = "identificador-da-jornada";
+    private static final String CHALLENGE_PATH = "/ciam/challenge";
 
     private final RequestForwarder forwarder = mock(RequestForwarder.class);
     private final AuthenticationJourneyClient journeyClient =
@@ -92,7 +95,8 @@ class ProxyFilterTest {
     void setUp() {
         when(forwarder.framingRejection(any())).thenReturn(Optional.empty());
         filter = new ProxyFilter(resolver(), forwarder, journeyClient,
-                identityProperties(), new ObjectMapper());
+                identityProperties(), new ChannelProperties(CHALLENGE_PATH),
+                new ObjectMapper());
     }
 
     private static MockHttpServletRequest request(String method, String uri) {
@@ -290,6 +294,175 @@ class ProxyFilterTest {
 
             verify(journeyClient, never()).start(any(), any());
             verify(forwarder).forward(any(), any());
+        }
+    }
+
+    @Nested
+    @DisplayName("continuação da jornada")
+    class ChallengeEndpoint {
+
+        private MockHttpServletRequest challengeRequest(String body) {
+            MockHttpServletRequest request = authenticated("POST", CHALLENGE_PATH);
+            request.setContentType("application/json");
+            request.setContent(body.getBytes(StandardCharsets.UTF_8));
+            return request;
+        }
+
+        private static String answerWith(String authId) {
+            return "{\"authId\":\"" + authId + "\","
+                    + "\"callbacks\":[{\"type\":\"NameCallback\","
+                    + "\"input\":[{\"name\":\"IDToken1\",\"value\":\"resposta\"}]}]}";
+        }
+
+        /**
+         * O endpoint é do sidecar, não do BFF. Encaminhá-lo produziria
+         * {@code 404} e o canal ficaria sem saber por quê.
+         */
+        @Test
+        @DisplayName("é tratado pelo sidecar e nunca encaminhado")
+        void isHandledBySidecarNeverForwarded() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)),
+                    new MockHttpServletResponse(), chain);
+
+            verify(forwarder, never()).forward(any(), any());
+            verify(journeyClient).advance(eq(AUTH_ID), any());
+        }
+
+        /**
+         * Sem normalizar, uma variação de escrita cairia na matriz como tráfego
+         * comum e seria encaminhada ao BFF, que não tem este endpoint.
+         */
+        @Test
+        @DisplayName("variação de escrita do path continua sendo tratada")
+        void pathVariationIsStillHandled() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+
+            MockHttpServletRequest request = authenticated("POST", CHALLENGE_PATH + "/");
+            request.setContentType("application/json");
+            request.setContent(answerWith(AUTH_ID).getBytes(StandardCharsets.UTF_8));
+
+            filter.doFilter(request, new MockHttpServletResponse(), chain);
+
+            verify(journeyClient).advance(any(), any());
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        /**
+         * O gateway espera os callbacks de volta como os enviou. Alterar
+         * estrutura, ordem ou campos de saída quebra a jornada.
+         */
+        @Test
+        @DisplayName("os callbacks são repassados sem interpretação")
+        void callbacksArePassedThroughUntouched() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)),
+                    new MockHttpServletResponse(), chain);
+
+            verify(journeyClient).advance(AUTH_ID, List.of(Map.of(
+                    "type", "NameCallback",
+                    "input", List.of(Map.of("name", "IDToken1", "value", "resposta")))));
+        }
+
+        @Test
+        @DisplayName("o próximo desafio é devolvido ao canal")
+        void nextChallengeIsReturned() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(401);
+            assertThat(response.getContentAsString())
+                    .contains("challenge_required")
+                    .contains(AUTH_ID);
+        }
+
+        @Test
+        @DisplayName("jornada concluída devolve autorização ao canal")
+        void completedJourneyReturnsAuthorized() throws Exception {
+            when(journeyClient.advance(any(), any()))
+                    .thenReturn(JourneyOutcome.completed(
+                            new JourneyStep(null, List.of(), "sessao-emitida")));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(200);
+            assertThat(response.getContentAsString()).contains("authorized");
+        }
+
+        /**
+         * A sessão emitida pelo gateway é credencial. O canal recebe apenas a
+         * confirmação de que a jornada concluiu.
+         */
+        @Test
+        @DisplayName("a sessão emitida não é devolvida ao canal")
+        void issuedSessionIsNotReturnedToChannel() throws Exception {
+            when(journeyClient.advance(any(), any()))
+                    .thenReturn(JourneyOutcome.completed(
+                            new JourneyStep(null, List.of(), "sessao-emitida")));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getContentAsString()).doesNotContain("sessao-emitida");
+        }
+
+        /**
+         * Sem identificador não há jornada a continuar, e chamar o gateway teria
+         * desfecho conhecido.
+         */
+        @Test
+        @DisplayName("resposta sem identificador de jornada não chama o gateway")
+        void answerWithoutJourneyIdentifierDoesNotCallGateway() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest("{\"callbacks\":[]}"), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(400);
+            verify(journeyClient, never()).advance(any(), any());
+        }
+
+        @Test
+        @DisplayName("corpo ilegível é recusado sem chamar o gateway")
+        void unreadableBodyIsRejected() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest("isso nao e json"), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(400);
+            verify(journeyClient, never()).advance(any(), any());
+        }
+
+        /**
+         * Método diferente não é resposta a desafio. Recusar evita que uma sonda
+         * com GET no endpoint produza chamada ao gateway.
+         */
+        @Test
+        @DisplayName("método diferente de POST não chama o gateway")
+        void otherMethodsDoNotCallGateway() throws Exception {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(authenticated("GET", CHALLENGE_PATH), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(405);
+            verify(journeyClient, never()).advance(any(), any());
+            verify(forwarder, never()).forward(any(), any());
+        }
+
+        @Test
+        @DisplayName("gateway indisponível vira 503")
+        void unavailableGatewayIsServiceUnavailable() throws Exception {
+            when(journeyClient.advance(any(), any())).thenThrow(
+                    new AuthenticationJourneyClient.JourneyUnavailableException("fora do ar"));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(challengeRequest(answerWith(AUTH_ID)), response, chain);
+
+            assertThat(response.getStatus()).isEqualTo(503);
         }
     }
 

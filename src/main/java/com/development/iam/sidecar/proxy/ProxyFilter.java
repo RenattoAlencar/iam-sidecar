@@ -1,5 +1,6 @@
 package com.development.iam.sidecar.proxy;
 
+import com.development.iam.sidecar.config.ChannelProperties;
 import com.development.iam.sidecar.config.IdentityProperties;
 import com.development.iam.sidecar.identity.AuthenticationJourneyClient;
 import com.development.iam.sidecar.identity.JourneyOutcome;
@@ -20,6 +21,7 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -85,17 +87,20 @@ public class ProxyFilter extends OncePerRequestFilter {
     private final RequestForwarder requestForwarder;
     private final AuthenticationJourneyClient journeyClient;
     private final IdentityProperties identityProperties;
+    private final ChannelProperties channelProperties;
     private final ObjectMapper objectMapper;
 
     public ProxyFilter(RouteResolver routeResolver,
                        RequestForwarder requestForwarder,
                        AuthenticationJourneyClient journeyClient,
                        IdentityProperties identityProperties,
+                       ChannelProperties channelProperties,
                        ObjectMapper objectMapper) {
         this.routeResolver = routeResolver;
         this.requestForwarder = requestForwarder;
         this.journeyClient = journeyClient;
         this.identityProperties = identityProperties;
+        this.channelProperties = channelProperties;
         this.objectMapper = objectMapper;
     }
 
@@ -136,6 +141,17 @@ public class ProxyFilter extends OncePerRequestFilter {
         }
 
         RouteDecision decision = routeResolver.resolve(request.getRequestURI(), method(request));
+
+        // A comparacao usa o path normalizado, nunca o bruto: sem isso, uma
+        // variacao de escrita — barra final, barra dupla, forma codificada — nao
+        // casaria, e a requisicao cairia na matriz como trafego comum. Seria
+        // encaminhada ao BFF, que nao tem este endpoint.
+        if (decision.outcome() != RouteDecision.Outcome.REJECT
+                && channelProperties.challengePath().equals(decision.normalizedPath())) {
+
+            continueJourney(request, response, correlationId);
+            return;
+        }
 
         switch (decision.outcome()) {
             case REJECT -> rejectMalformedPath(response, decision, correlationId);
@@ -200,6 +216,86 @@ public class ProxyFilter extends OncePerRequestFilter {
         }
 
         applyOutcome(response, outcome, rule, correlationId);
+    }
+
+    /**
+     * Continua a jornada com a resposta do canal a um passo anterior.
+     * <p>
+     * Este é o único endpoint próprio do sidecar. Fica aqui, e não num
+     * controller, para atravessar as mesmas verificações do restante do tráfego:
+     * enquadramento, normalização de path, política de cabeçalhos e teto de
+     * corpo. Um controller seria roteado direto pelo Spring, sem passar por
+     * nenhuma delas — e as proteções do componente valeriam para um caminho de
+     * entrada e não para o outro.
+     * <p>
+     * O sidecar não interpreta os callbacks: recebe do canal, entrega ao
+     * gateway. Serve a todos os passos indistintamente — confirmação, espera,
+     * código, chave de dispositivo.
+     */
+    private void continueJourney(HttpServletRequest request,
+                                 HttpServletResponse response,
+                                 String correlationId) throws IOException {
+
+        if (!HttpMethod.POST.matches(request.getMethod())) {
+            // Metodo diferente nao e resposta a desafio. Recusar aqui evita que
+            // uma sonda com GET no endpoint produza chamada ao gateway.
+            log.debug("Método não aceito no endpoint de desafio: {}", request.getMethod());
+            respond(response, HttpStatus.METHOD_NOT_ALLOWED, "bad_request", correlationId);
+            return;
+        }
+
+        ChallengeAnswer answer = readChallengeAnswer(request);
+
+        if (answer == null || answer.authId() == null || answer.authId().isBlank()) {
+            // Sem identificador nao ha jornada a continuar, e chamar o gateway
+            // teria desfecho conhecido.
+            log.warn("Resposta de desafio sem identificador de jornada");
+            respond(response, HttpStatus.BAD_REQUEST, "bad_request", correlationId);
+            return;
+        }
+
+        log.info("Resposta de desafio recebida: callbacks={}",
+                answer.callbacks() == null ? 0 : answer.callbacks().size());
+
+        JourneyOutcome outcome;
+        try {
+            outcome = journeyClient.advance(answer.authId(), answer.callbacks());
+
+        } catch (AuthenticationJourneyClient.JourneyUnavailableException e) {
+            log.error("Gateway de identidade indisponível ao continuar a jornada", e);
+            respond(response, HttpStatus.SERVICE_UNAVAILABLE, "authorization_unavailable",
+                    correlationId);
+            return;
+        }
+
+        applyOutcome(response, outcome, "challenge", correlationId);
+    }
+
+    /**
+     * Lê o corpo da resposta ao desafio.
+     * <p>
+     * Corpo ilegível devolve {@code null}, e quem chama recusa. Não se tenta
+     * adivinhar: o corpo é o que o canal recebeu do gateway com um campo
+     * preenchido, e qualquer coisa fora disso não é resposta a desafio.
+     */
+    private ChallengeAnswer readChallengeAnswer(HttpServletRequest request) {
+        try {
+            return objectMapper.readValue(request.getInputStream(), ChallengeAnswer.class);
+        } catch (Exception e) {
+            // Nem a excecao nem o corpo entram no log: o corpo carrega a resposta
+            // do desafio, que pode ser captura biométrica ou código.
+            log.debug("Corpo do desafio ilegível");
+            return null;
+        }
+    }
+
+    /**
+     * O que o canal envia ao responder um passo da jornada.
+     * <p>
+     * Mesma forma que o gateway devolveu, com os campos de entrada preenchidos.
+     * O canal reenvia inclusive nos passos de espera, sem alterar nada.
+     */
+    private record ChallengeAnswer(String authId, List<Map<String, Object>> callbacks) {
     }
 
     /**

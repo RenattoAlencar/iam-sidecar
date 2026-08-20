@@ -23,7 +23,7 @@ import java.net.http.HttpClient;
  * esse alguém é esta classe.
  */
 @Configuration
-@EnableConfigurationProperties(ProxyProperties.class)
+@EnableConfigurationProperties({ProxyProperties.class, ChannelProperties.class})
 public class ProxyConfiguration {
 
     /**
@@ -86,11 +86,12 @@ public class ProxyConfiguration {
             RequestForwarder requestForwarder,
             AuthenticationJourneyClient journeyClient,
             IdentityProperties identityProperties,
+            ChannelProperties channelProperties,
             ObjectMapper objectMapper) {
 
         FilterRegistrationBean<ProxyFilter> registration = new FilterRegistrationBean<>(
                 new ProxyFilter(routeResolver, requestForwarder, journeyClient,
-                        identityProperties, objectMapper));
+                        identityProperties, channelProperties, objectMapper));
 
         registration.addUrlPatterns("/*");
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
