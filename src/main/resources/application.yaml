@@ -1,23 +1,139 @@
+# ============================================================================
+# Sidecar de confirmação adicional
+#
+# Os valores usam placeholders: o padrão depois dos dois-pontos vale para
+# desenvolvimento, e cada ambiente sobrescreve pelo values.
+# ============================================================================
+
 spring:
   application:
-    name: iam.sidecar
+    name: iam-sidecar
 
+  # O sidecar não autentica ninguém: ele encaminha ou nega com base na matriz.
+  # Bibliotecas corporativas costumam trazer Spring Security transitivamente, e
+  # a cadeia de filtros dele decidiria sobre a mesma requisição que o
+  # ProxyFilter decide — duas cadeias sobre a mesma requisição é como nascem
+  # bypasses que ninguém consegue explicar. O ProxyFilter é registrado com
+  # precedência máxima justamente para ser o primeiro.
+  #
+  # Se nenhuma dessas classes estiver no classpath, a exclusão é ignorada sem
+  # erro. Manter a lista custa nada e evita meia sessão de diagnóstico quando
+  # alguma delas aparecer por dependência transitiva.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration
+      - org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+      - org.springframework.boot.autoconfigure.security.oauth2.resource.servlet.OAuth2ResourceServerAutoConfiguration
+      - org.springframework.boot.autoconfigure.security.oauth2.client.servlet.OAuth2ClientAutoConfiguration
+
+# ----------------------------------------------------------------------------
+# Portas
+# ----------------------------------------------------------------------------
+
+# Sem context-path: o sidecar precisa receber exatamente os mesmos paths que o
+# BFF expõe, senão a interceptação deixa de ser transparente para o canal.
+server:
+  port: ${SIDECAR_PORT:8080}
+
+# Actuator em porta separada, com contexto próprio. Na porta principal ele seria
+# capturado pelo filtro e encaminhado ao BFF, e a sonda de prontidão passaria a
+# medir a saúde do BFF em vez da do sidecar.
+management:
+  server:
+    port: ${SIDECAR_MANAGEMENT_PORT:8090}
+  endpoints:
+    web:
+      exposure:
+        # Nunca "*": /env e /configprops imprimem configuração sensível em JSON,
+        # e /heapdump entrega a memória do processo.
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+# ----------------------------------------------------------------------------
+# Proxy
+# ----------------------------------------------------------------------------
 
 proxy:
-  target: http://127.0.0.1:8081
+  # Loopback é verificado no boot. O BFF alcançável de fora do pod torna o
+  # sidecar contornável e anula toda a interceptação. Só a porta deveria
+  # precisar mudar entre ambientes.
+  target: ${PROXY_TARGET:http://127.0.0.1:8081}
+
+  connect-timeout: ${PROXY_CONNECT_TIMEOUT:2s}
+  read-timeout: ${PROXY_READ_TIMEOUT:10s}
+
+  # Dimensionar pelo maior payload legítimo do canal, com folga — não pelo que a
+  # JVM aguenta. Sidecar e BFF dividem o limite de memória do pod, e derrubar um
+  # derruba o outro.
+  #
+  # PENDENTE: a foto em base64 da jornada de biometria é o maior payload do
+  # fluxo e ainda não foi medida com o time do canal. 2 MiB é estimativa.
+  max-body-bytes: ${PROXY_MAX_BODY_BYTES:2097152}
+
+  # Headers que o sidecar escreve e que ninguém mais pode definir. Vazio
+  # enquanto ele não injeta nenhum; o primeiro que existir entra aqui no mesmo
+  # commit, senão o canal o forja e declara por conta própria que a confirmação
+  # aconteceu.
+  reserved-headers: [ ]
+
+  # --------------------------------------------------------------------------
+  # MATRIZ DE INTERCEPTAÇÃO
+  #
+  # Nome e path vêm de variável, uma por rota. O método fica aqui, versionado
+  # com o código.
+  #
+  # A divisão é deliberada. O path muda entre ambientes; qual verbo é sensível
+  # não muda. Deixar o método no values permitiria desproteger uma rota editando
+  # um arquivo de ambiente, sem passar por revisão.
+  #
+  # Não se usa índice de lista em variável de ambiente. O Spring lê a lista por
+  # índice até não encontrar, e um erro no meio faz as regras seguintes
+  # desaparecerem — sem erro, sem alerta, e as rotas que sumiram passam a ser
+  # encaminhadas sem verificação. Com uma variável nomeada por rota, o pior caso
+  # é o padrão abaixo continuar valendo.
+  #
+  # Conferir sempre a matriz efetiva no log de boot antes de considerar um
+  # ambiente configurado.
+  # --------------------------------------------------------------------------
   intercept-rules:
-    - name: pix-transfer
-      path: /api/v1/pix/transferencia
-      methods: [POST]
 
-    - name: pix-keys-register
-      path: /api/v1/pix/chaves
-      methods: [POST]
+    - name: ${NAME_PIX_TRANSFERENCIA:pix-transfer}
+      path: ${URL_PIX_TRANSFERENCIA:/api/v1/pix/transferencia}
+      methods: [ POST ]
 
-    - name: boleto-payment
-      path: /api/v2/pagamentos/boletos/codigo-de-barras/pagamento
-      methods: [POST]
+    # O GET no mesmo endereço fica de fora da matriz e por isso é encaminhado:
+    # listar as próprias chaves é consulta; cadastrar uma nova redireciona
+    # dinheiro depois.
+    - name: ${NAME_PIX_CHAVES:pix-keys-register}
+      path: ${URL_PIX_CHAVES:/api/v1/pix/chaves}
+      methods: [ POST ]
 
-    - name: limite-consulta
-      path: /api/v1/conta/limites/transacionais
-      methods: [GET]
+    - name: ${NAME_BOLETO:boleto-payment}
+      path: ${URL_BOLETO:/api/v2/pagamentos/boletos/pagamento}
+      methods: [ POST ]
+
+    - name: ${NAME_TED:ted-transfer}
+      path: ${URL_TED:/api/v1/transferencias/ted}
+      methods: [ POST ]
+
+# ----------------------------------------------------------------------------
+# Log
+# ----------------------------------------------------------------------------
+
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    com.development.iam.sidecar: ${LOG_LEVEL_SIDECAR:INFO}
+
+  # O identificador de correlação vem do contexto de log e aparece em todo
+  # registro da requisição. É o que liga um chamado de suporte a uma linha.
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{correlationId:-sem-correlacao}] %logger{36} - %msg%n"
