@@ -109,6 +109,7 @@ class JourneyIntegrationTest {
     @BeforeEach
     void setUp() {
         requireEnv(BASE_URL, "IDENTITY_BASE_URL");
+        requireEnv(CHANNEL_TOKEN_HEADER, "IDENTITY_CHANNEL_TOKEN_HEADER");
         requireEnv(CHANNEL_TOKEN_HEADER, "IDENTITY_TOKEN_HEADER");
 
         IdentityProperties properties = new IdentityProperties(

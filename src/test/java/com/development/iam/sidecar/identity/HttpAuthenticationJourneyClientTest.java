@@ -1,7 +1,13 @@
 package com.development.iam.sidecar.identity;
 
 import com.development.iam.sidecar.config.IdentityProperties;
-import org.junit.jupiter.api.*;
+import com.github.tomakehurst.wiremock.WireMockServer;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
@@ -10,6 +16,14 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
+import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -29,17 +43,15 @@ class HttpAuthenticationJourneyClientTest {
     private static final String AUTH_ID = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.jornada";
     private static final String OTP = "149707";
 
+    private static final String CHANNEL_TOKEN_HEADER = "x-canal-autenticacao";
+    private static final String AUTHENTICATOR_CODE_HEADER = "x-canal-codigo";
+
     private static final String AUTHENTICATE_PATH = "/am/json/realms/" + REALM + "/authenticate";
 
-    /**
-     * Nomes fictícios: os reais vêm de configuração e não pertencem ao código.
-     */
-    private static final String CHANNEL_TOKEN_HEADER = "x-canal-authentication";
+    /** Nomes fictícios: os reais vêm de configuração e não pertencem ao código. */
     private static final String CODE_HEADER = "x-canal-token";
 
-    /**
-     * Passo 1: desafio de biometria.
-     */
+    /** Passo 1: desafio de biometria. */
     private static final String BIOMETRIC_CHALLENGE = """
             {
               "authId": "%s",
@@ -58,9 +70,7 @@ class HttpAuthenticationJourneyClientTest {
             }
             """.formatted(AUTH_ID);
 
-    /**
-     * Passo 3: espera enquanto a análise biométrica não termina.
-     */
+    /** Passo 3: espera enquanto a análise biométrica não termina. */
     private static final String POLLING_WAIT = """
             {
               "authId": "%s",
@@ -76,9 +86,7 @@ class HttpAuthenticationJourneyClientTest {
             }
             """.formatted(AUTH_ID);
 
-    /**
-     * Resposta final: sessão emitida.
-     */
+    /** Resposta final: sessão emitida. */
     private static final String COMPLETED = """
             {
               "tokenId": "sessao-emitida-pelo-am",

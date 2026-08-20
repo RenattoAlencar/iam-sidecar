@@ -194,8 +194,16 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
         }
 
         if (status != HttpStatus.OK.value()) {
+            // O status entra na mensagem: e um numero, nao revela nada, e sem ele
+            // o diagnostico fica cego — 413 aponta para tamanho de corpo, 400
+            // para formato, 502 para o gateway. A mensagem do corpo fica so no
+            // log, porque pode carregar detalhe interno do provedor.
+            log.warn("Status inesperado do gateway no passo de {}: {} — corpo: {}",
+                    stepName, status, extractReason(body));
+
             throw new JourneyUnavailableException(
-                    "Gateway de identidade respondeu status inesperado no passo de " + stepName);
+                    "Gateway de identidade respondeu status " + status
+                            + " no passo de " + stepName);
         }
 
         JourneyStep step = readStep(stepName, body);

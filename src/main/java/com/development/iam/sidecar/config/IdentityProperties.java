@@ -151,6 +151,8 @@ public record IdentityProperties(
         requirePositive(readTimeout, "identity.read-timeout");
     }
 
+
+
     /**
      * Exige HTTPS, liberando apenas loopback.
      * <p>

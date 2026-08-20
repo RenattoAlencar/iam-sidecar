@@ -7,9 +7,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
-import org.springframework.boot.autoconfigure.validation.ValidationAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 
 import java.net.URI;
 import java.time.Duration;
@@ -223,7 +223,8 @@ class IdentityPropertiesTest {
                             "identity.journey=factor-onboarding",
                             "identity.client-id=sidecar-client",
                             "identity.client-secret=segredo",
-                            "identity.redirect-uri=https://canal.exemplo.com.br/callback")
+                            "identity.redirect-uri=https://canal.exemplo.com.br/callback",
+                            "identity.channel-token-header=x-canal-autenticacao")
                     .run(context -> assertThat(context).hasFailed());
         }
 
