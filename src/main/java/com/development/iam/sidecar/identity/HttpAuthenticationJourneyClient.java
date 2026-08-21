@@ -5,12 +5,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -133,18 +131,25 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
      * tratamento da resposta são idênticos — o que difere é o corpo e um
      * cabeçalho.
      *
-     * <h3>Por que {@code exchange} e não {@code retrieve}</h3>
-     * O {@code retrieve} aplica o tratamento padrão de erro, que transforma
-     * qualquer status acima de {@code 400} em exceção — e aqui o {@code 401} e o
-     * {@code 408} são respostas normais que precisam ser lidas.
+     * <h3>Como o corpo de uma resposta de erro é obtido</h3>
+     * O status de erro do gateway carrega a informação que mais importa no
+     * diagnóstico: a mensagem que distingue biometria reprovada de código
+     * inválido. Obtê-la exigiu duas tentativas que não funcionam, e vale
+     * registrá-las para que ninguém as refaça.
      * <p>
-     * Desligar esse tratamento com um manipulador de status vazio não funciona:
-     * o corpo é consumido durante a verificação e chega vazio na leitura
-     * seguinte, fazendo toda recusa parecer resposta sem detalhe.
+     * <strong>{@code exchange} não serve.</strong> Ele entrega a resposta crua,
+     * mas o fluxo do corpo chega vazio em resposta de erro — o cliente já o
+     * consumiu ao montar a resposta. Envolver a fábrica com bufferização também
+     * não resolve.
      * <p>
-     * O {@code exchange} entrega a resposta crua — status e corpo — sem nenhum
-     * tratamento no caminho. É o que permite distinguir recusa de
-     * indisponibilidade.
+     * <strong>Manipulador de status vazio não serve.</strong> Desligar o
+     * tratamento padrão com {@code onStatus} faz o corpo ser consumido durante a
+     * verificação, e a leitura seguinte encontra vazio.
+     * <p>
+     * O que funciona é deixar o tratamento padrão agir: ele lança
+     * {@link RestClientResponseException}, e <em>essa exceção carrega o corpo</em>.
+     * Capturá-la aqui e traduzir em desfecho preserva a distinção entre recusa —
+     * que é resposta normal do gateway — e indisponibilidade, que é falha.
      */
     private JourneyOutcome execute(String stepName, RequestCustomizer customizer) {
         try {
@@ -159,46 +164,33 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
 
             Object body = customizer.customize(request);
 
-            return request
+            String responseBody = request
                     .body(body)
-                    .exchange((outgoing, response) -> translate(
-                            stepName,
-                            response.getStatusCode().value(),
-                            readBody(response)));
+                    .retrieve()
+                    .body(String.class);
+
+            return translate(stepName, HttpStatus.OK.value(), responseBody);
+
+        } catch (RestClientResponseException e) {
+            // Precisa vir antes do catch abaixo: esta excecao estende a outra.
+            //
+            // Status de erro chega aqui, e a excecao carrega o corpo. Recusa e
+            // sessao expirada sao respostas normais do gateway, nao falhas — por
+            // isso viram desfecho em vez de subirem.
+            //
+            // UTF-8 explicito: a mensagem do gateway vem acentuada, e o padrao do
+            // sistema operacional decidiria a decodificacao, produzindo resultados
+            // diferentes entre a maquina de desenvolvimento e o conteiner.
+            return translate(stepName, e.getStatusCode().value(),
+                    e.getResponseBodyAsString(StandardCharsets.UTF_8));
 
         } catch (RestClientException e) {
+            // Gateway inacessivel, prazo esgotado, resposta inutilizavel.
+            //
             // A causa nao entra na mensagem: ela carrega o endereco do gateway e
             // o corpo da resposta, e a mensagem pode acabar exposta.
             throw new JourneyUnavailableException(
                     "Falha ao contatar o gateway de identidade no passo de " + stepName, e);
-        }
-    }
-
-    /**
-     * Lê o corpo da resposta como texto, direto do fluxo.
-     * <p>
-     * O conversor de mensagem do cliente não entrega o corpo de forma confiável
-     * em resposta de erro — e é justamente nela que está a mensagem que
-     * distingue biometria reprovada de código inválido no diagnóstico. Sem esta
-     * leitura, toda recusa chega como "sem detalhe".
-     * <p>
-     * UTF-8 explícito, e não o padrão da plataforma: a mensagem do gateway vem
-     * acentuada, e o padrão do sistema operacional decidiria a decodificação —
-     * o mesmo código produziria resultados diferentes entre a máquina de
-     * desenvolvimento e o contêiner.
-     *
-     * @return o corpo, ou {@code null} se não for legível. Quem trata distingue
-     *         os dois casos: corpo ausente em resposta de sucesso é falha, em
-     *         resposta de recusa é apenas ausência de detalhe
-     */
-    private static String readBody(ClientHttpResponse response) {
-        try (InputStream body = response.getBody()) {
-            byte[] bytes = body.readAllBytes();
-            return bytes.length == 0 ? null : new String(bytes, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            // Corpo ilegivel nao e motivo para transformar recusa em
-            // indisponibilidade: o status ja disse o que aconteceu.
-            return null;
         }
     }
 
@@ -209,7 +201,6 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
      * a sessão emitida encerra o assunto mesmo que traga callbacks residuais.
      */
     private JourneyOutcome translate(String stepName, int status, String body) {
-        System.out.println(">>> STATUS=" + status + " BODY=[" + body + "]");   // TEMPORÁRIO
         if (status == HttpStatus.REQUEST_TIMEOUT.value()) {
             // 408: a sessao da jornada expirou por inatividade. Nao e recusa —
             // nada foi negado, o cliente apenas demorou. O canal precisa
