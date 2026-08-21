@@ -12,6 +12,7 @@ import org.springframework.web.client.RestClientResponseException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Implementação HTTP do cliente da jornada.
@@ -96,6 +97,9 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             throw new JourneyUnavailableException("Token do canal ausente ao iniciar a jornada");
         }
 
+        log.info("Iniciando a jornada '{}' no realm '{}'",
+                properties.journey(), properties.realm());
+
         return execute("início", request -> {
             request.header(properties.channelTokenHeader(), channelToken);
 
@@ -107,6 +111,9 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             // simplesmente nao e enviado.
             boolean codeConfigured = !properties.authenticatorCodeHeader().isBlank();
             if (codeConfigured && otpCode != null && !otpCode.isBlank()) {
+                // O valor nao entra no log: e credencial de uso unico, mas
+                // dentro da janela vale uma autenticacao.
+                log.debug("Código de autenticador apresentado — a jornada pode ser encurtada");
                 request.header(properties.authenticatorCodeHeader(), otpCode);
             }
             return EMPTY_BODY;
@@ -121,6 +128,8 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
 
         // O token do canal nao se repete: ele so identifica quem inicia. Repeti-lo
         // seria carregar credencial por passos que nao a exigem.
+        log.info("Continuando a jornada: respondendo {}", summarize(callbacks));
+
         return execute("continuação", request -> JourneyStep.advancing(authId, callbacks));
     }
 
@@ -181,13 +190,8 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             // UTF-8 explicito: a mensagem do gateway vem acentuada, e o padrao do
             // sistema operacional decidiria a decodificacao, produzindo resultados
             // diferentes entre a maquina de desenvolvimento e o conteiner.
-            String responseBodyOnError = e.getResponseBodyAsString(StandardCharsets.UTF_8);
-
-            // TEMPORARIO — remover depois de diagnosticar de onde o corpo some.
-            System.out.println(">>> CATCH status=" + e.getStatusCode().value()
-                    + " corpo=[" + responseBodyOnError + "]");
-
-            return translate(stepName, e.getStatusCode().value(), responseBodyOnError);
+            return translate(stepName, e.getStatusCode().value(),
+                    e.getResponseBodyAsString(StandardCharsets.UTF_8));
 
         } catch (RestClientException e) {
             // Gateway inacessivel, prazo esgotado, resposta inutilizavel.
@@ -206,6 +210,12 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
      * a sessão emitida encerra o assunto mesmo que traga callbacks residuais.
      */
     private JourneyOutcome translate(String stepName, int status, String body) {
+        // Registro de fronteira: status e tamanho, nunca conteudo. O tamanho
+        // basta para distinguir "o gateway nao mandou corpo" de "mandou e a
+        // leitura falhou" — que era exatamente a duvida que custou tempo antes.
+        log.debug("Resposta do gateway no passo de {}: status={}, corpo={} bytes",
+                stepName, status, body == null ? 0 : body.length());
+
         if (status == HttpStatus.REQUEST_TIMEOUT.value()) {
             // 408: a sessao da jornada expirou por inatividade. Nao e recusa —
             // nada foi negado, o cliente apenas demorou. O canal precisa
@@ -238,13 +248,14 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
         JourneyStep step = readStep(stepName, body);
 
         if (step.isComplete()) {
-            log.debug("Jornada concluída no passo de {}", stepName);
+            log.info("Jornada concluída no passo de {}: sessão emitida pelo gateway", stepName);
             return JourneyOutcome.completed(step);
         }
 
         if (step.hasChallenge()) {
-            log.debug("Desafio recebido no passo de {}: {} callback(s)",
-                    stepName, step.callbacks().size());
+            // O resumo mostra por onde a jornada esta passando — confirmacao,
+            // espera, embarque, codigo, dispositivo — sem revelar conteudo.
+            log.info("Passo de {} recebeu desafio: {}", stepName, summarize(step.callbacks()));
             return JourneyOutcome.challenge(step);
         }
 
@@ -276,16 +287,29 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
      * <p>
      * Fica no log e não na resposta ao canal. O formato é
      * {@code {"code":401,"reason":"Unauthorized","message":"..."}}, e a
-     * {@code message} é o que distingue biometria reprovada de OTP inválido no
-     * diagnóstico.
+     * {@code message} é o que distingue biometria reprovada de código inválido
+     * no diagnóstico.
+     *
+     * <h3>Três saídas distintas, e não uma só</h3>
+     * Devolver o mesmo rótulo para toda falha de leitura já custou caro: com
+     * {@code "sem detalhe"} cobrindo corpo ausente, campo faltando e JSON
+     * malformado, não havia como saber qual dos três estava acontecendo — e o
+     * primeiro deles apontava para um defeito no cliente HTTP, não no gateway.
      * <p>
-     * Corpo ilegível não é problema: devolve um rótulo genérico. A recusa vale
-     * de qualquer forma, e falhar aqui transformaria uma negação normal em
-     * indisponibilidade.
+     * Cada saída aponta para um lugar diferente:
+     * <ul>
+     *   <li>{@code sem corpo} — o corpo não chegou. Problema no cliente HTTP ou
+     *       na fábrica de requisição, não no gateway.</li>
+     *   <li>{@code sem detalhe} — o corpo chegou e não tem o campo. O contrato
+     *       do gateway mudou, ou a recusa veio de outro ponto.</li>
+     *   <li>{@code corpo ilegível} — não é JSON. Provavelmente uma página de
+     *       erro de proxy ou balanceador no caminho.</li>
+     * </ul>
      */
     private static String extractReason(String body) {
         if (body == null || body.isBlank()) {
-            return "sem detalhe";
+            log.debug("Corpo da recusa ausente — verificar o cliente HTTP, não o gateway");
+            return "sem corpo";
         }
         try {
             // Leitura em arvore em vez de mapa tipado: o corpo de erro nao e
@@ -293,16 +317,96 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             // e fragil.
             var message = JsonSupport.readTree(body).get("message");
 
-            // TEMPORARIO — remover depois de diagnosticar.
-            System.out.println(">>> EXTRACT node=" + message
-                    + " tipo=" + (message == null ? "null" : message.getClass().getSimpleName()));
+            if (message == null || message.isNull()) {
+                log.debug("Corpo da recusa sem o campo de mensagem");
+                return "sem detalhe";
+            }
+            return message.asString();
 
-            return message == null || message.isNull() ? "sem detalhe" : message.asString();
         } catch (Exception e) {
-            // TEMPORARIO — remover depois de diagnosticar.
-            System.out.println(">>> EXTRACT falhou: " + e);
-            return "sem detalhe";
+            // O corpo entra no log aqui, e so aqui: nesta resposta ele e
+            // mensagem de erro do gateway, nao conteudo de callback. Sem ele,
+            // uma pagina de erro de proxy no caminho seria indistinguivel de um
+            // contrato que mudou.
+            log.debug("Corpo da recusa ilegível: {}", body);
+            return "corpo ilegível";
         }
+    }
+
+    /**
+     * Resume os callbacks de um passo para o log, sem revelar conteúdo.
+     * <p>
+     * É o que permite acompanhar por onde a jornada está passando —
+     * confirmação por biometria, espera pela análise, embarque do autenticador,
+     * código, chave de dispositivo — sem que nada sensível chegue ao arquivo de
+     * log.
+     *
+     * <h3>Lista de permitidos, e não de proibidos</h3>
+     * Só os campos abaixo entram, e o resto é descartado. A escolha é
+     * deliberada: com uma lista de proibidos, cada passo novo que o time de
+     * identidade criasse poderia trazer um campo sensível que ninguém lembraria
+     * de acrescentar — e o vazamento seria silencioso.
+     * <p>
+     * O que fica de fora, e por quê:
+     * <ul>
+     *   <li>Todo o {@code input} — é onde o canal preenche a captura biométrica
+     *       e o código digitado.</li>
+     *   <li>{@code message} do {@code output} — no passo de embarque, é a
+     *       semente do autenticador, com o segredo que gera os códigos.</li>
+     * </ul>
+     */
+    private static String summarize(List<Map<String, Object>> callbacks) {
+        if (callbacks == null || callbacks.isEmpty()) {
+            return "nenhum";
+        }
+
+        StringBuilder resumo = new StringBuilder();
+
+        for (Map<String, Object> callback : callbacks) {
+            if (!resumo.isEmpty()) {
+                resumo.append(", ");
+            }
+            resumo.append(callback.get("type"));
+
+            String labels = safeLabels(callback.get("output"));
+            if (!labels.isEmpty()) {
+                resumo.append('(').append(labels).append(')');
+            }
+        }
+        return resumo.toString();
+    }
+
+    /**
+     * Campos do {@code output} que são rótulo de passo, nunca valor.
+     * <p>
+     * {@code prompt} identifica o que está sendo pedido, {@code waitTime} indica
+     * o intervalo da espera e {@code defaultValue} traz o tipo de confirmação
+     * pretendida. Nenhum deles é credencial.
+     */
+    private static final Set<String> LOGGABLE_OUTPUT_FIELDS =
+            Set.of("prompt", "waitTime", "defaultValue");
+
+    private static String safeLabels(Object output) {
+        if (!(output instanceof List<?> fields)) {
+            return "";
+        }
+
+        StringBuilder labels = new StringBuilder();
+
+        for (Object field : fields) {
+            if (!(field instanceof Map<?, ?> entry)) {
+                continue;
+            }
+            Object name = entry.get("name");
+            if (name == null || !LOGGABLE_OUTPUT_FIELDS.contains(name.toString())) {
+                continue;
+            }
+            if (!labels.isEmpty()) {
+                labels.append(' ');
+            }
+            labels.append(name).append('=').append(entry.get("value"));
+        }
+        return labels.toString();
     }
 
     /**

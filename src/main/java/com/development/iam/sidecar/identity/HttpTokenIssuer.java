@@ -80,6 +80,9 @@ public class HttpTokenIssuer implements TokenIssuer {
             throw new TokenIssuanceException("Sessão da jornada ausente ao obter o token");
         }
 
+        log.info("Obtendo token: cliente='{}', escopos='{}'",
+                properties.clientId(), properties.scopes());
+
         // Gerado aqui e usado nas duas chamadas seguintes. Variavel local: nada
         // precisa sobreviver a esta requisicao.
         PkceChallenge pkce = PkceChallenge.generate();
@@ -115,9 +118,15 @@ public class HttpTokenIssuer implements TokenIssuer {
                             res.getStatusCode().value(),
                             res.getHeaders().getFirst(HttpHeaders.LOCATION)));
 
+            // Status e presenca do destino, nunca o destino em si: ele carrega
+            // o codigo de autorizacao, que dentro da janela vale um token.
+            log.debug("Pedido do código de autorização: status={}, redirecionamento={}",
+                    response.status(), response.location() == null ? "ausente" : "presente");
+
             return extractCode(response);
 
         } catch (RestClientException e) {
+            log.error("Falha de comunicação ao pedir o código de autorização", e);
             throw new TokenIssuanceException("Falha ao obter o código de autorização", e);
         }
     }
@@ -176,9 +185,14 @@ public class HttpTokenIssuer implements TokenIssuer {
                             res.getStatusCode().value(),
                             res.bodyTo(String.class)));
 
+            log.debug("Troca do código pelo token: status={}, corpo={} bytes",
+                    response.status(),
+                    response.body() == null ? 0 : response.body().length());
+
             return readToken(response);
 
         } catch (RestClientException e) {
+            log.error("Falha de comunicação ao trocar o código pelo token", e);
             throw new TokenIssuanceException("Falha ao trocar o código pelo token", e);
         }
     }
@@ -207,7 +221,8 @@ public class HttpTokenIssuer implements TokenIssuer {
             throw new TokenIssuanceException("Gateway respondeu sem token de acesso");
         }
 
-        log.debug("Token emitido: tipo={}, validade={}s", token.tokenType(), token.expiresIn());
+        log.info("Token emitido pelo gateway: tipo={}, validade={}s",
+                token.tokenType(), token.expiresIn());
         return token;
     }
 
