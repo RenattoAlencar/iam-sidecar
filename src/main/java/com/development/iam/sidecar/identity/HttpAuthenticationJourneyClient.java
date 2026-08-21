@@ -5,9 +5,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -160,13 +164,41 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
                     .exchange((outgoing, response) -> translate(
                             stepName,
                             response.getStatusCode().value(),
-                            response.bodyTo(String.class)));
+                            readBody(response)));
 
         } catch (RestClientException e) {
             // A causa nao entra na mensagem: ela carrega o endereco do gateway e
             // o corpo da resposta, e a mensagem pode acabar exposta.
             throw new JourneyUnavailableException(
                     "Falha ao contatar o gateway de identidade no passo de " + stepName, e);
+        }
+    }
+
+    /**
+     * Lê o corpo da resposta como texto, direto do fluxo.
+     * <p>
+     * O conversor de mensagem do cliente não entrega o corpo de forma confiável
+     * em resposta de erro — e é justamente nela que está a mensagem que
+     * distingue biometria reprovada de código inválido no diagnóstico. Sem esta
+     * leitura, toda recusa chega como "sem detalhe".
+     * <p>
+     * UTF-8 explícito, e não o padrão da plataforma: a mensagem do gateway vem
+     * acentuada, e o padrão do sistema operacional decidiria a decodificação —
+     * o mesmo código produziria resultados diferentes entre a máquina de
+     * desenvolvimento e o contêiner.
+     *
+     * @return o corpo, ou {@code null} se não for legível. Quem trata distingue
+     *         os dois casos: corpo ausente em resposta de sucesso é falha, em
+     *         resposta de recusa é apenas ausência de detalhe
+     */
+    private static String readBody(ClientHttpResponse response) {
+        try (InputStream body = response.getBody()) {
+            byte[] bytes = body.readAllBytes();
+            return bytes.length == 0 ? null : new String(bytes, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            // Corpo ilegivel nao e motivo para transformar recusa em
+            // indisponibilidade: o status ja disse o que aconteceu.
+            return null;
         }
     }
 
