@@ -181,8 +181,13 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             // UTF-8 explicito: a mensagem do gateway vem acentuada, e o padrao do
             // sistema operacional decidiria a decodificacao, produzindo resultados
             // diferentes entre a maquina de desenvolvimento e o conteiner.
-            return translate(stepName, e.getStatusCode().value(),
-                    e.getResponseBodyAsString(StandardCharsets.UTF_8));
+            String responseBodyOnError = e.getResponseBodyAsString(StandardCharsets.UTF_8);
+
+            // TEMPORARIO — remover depois de diagnosticar de onde o corpo some.
+            System.out.println(">>> CATCH status=" + e.getStatusCode().value()
+                    + " corpo=[" + responseBodyOnError + "]");
+
+            return translate(stepName, e.getStatusCode().value(), responseBodyOnError);
 
         } catch (RestClientException e) {
             // Gateway inacessivel, prazo esgotado, resposta inutilizavel.
@@ -287,8 +292,15 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
             // contrato estavel, e desserializar para Map sem tipo parametrizado
             // e fragil.
             var message = JsonSupport.readTree(body).get("message");
+
+            // TEMPORARIO — remover depois de diagnosticar.
+            System.out.println(">>> EXTRACT node=" + message
+                    + " tipo=" + (message == null ? "null" : message.getClass().getSimpleName()));
+
             return message == null || message.isNull() ? "sem detalhe" : message.asString();
         } catch (Exception e) {
+            // TEMPORARIO — remover depois de diagnosticar.
+            System.out.println(">>> EXTRACT falhou: " + e);
             return "sem detalhe";
         }
     }
