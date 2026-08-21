@@ -1,0 +1,385 @@
+{
+  "info": {
+    "name": "Sidecar — fluxo consultivo de ponta a ponta",
+    "description": "Percorre o fluxo consultivo inteiro: o canal chama a rota protegida pelo sidecar, o aplicativo resolve o desafio direto no provedor, e o polling conclui.\n\nPREENCHER NO AMBIENTE: sidecarUrl, gatewayUrl, realm, channelToken, otpSecret.\n\nATENCAO AOS DOIS IDENTIFICADORES DE JORNADA. O do PDC vai no polling; o do aplicativo vai no OTP. Troca-los e o erro mais facil de cometer — a colecao os guarda em variaveis separadas justamente por isso.\n\nOs passos 2 e 3 vao DIRETO ao provedor, sem passar pelo sidecar. E o papel do aplicativo, que em producao fala pelo deeplink.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "authIdPdc",
+      "value": ""
+    },
+    {
+      "key": "authIdApp",
+      "value": ""
+    },
+    {
+      "key": "transactionId",
+      "value": ""
+    },
+    {
+      "key": "otpCallback",
+      "value": ""
+    },
+    {
+      "key": "otpCode",
+      "value": ""
+    },
+    {
+      "key": "otpBody",
+      "value": ""
+    },
+    {
+      "key": "hotpCounter",
+      "value": "0"
+    },
+    {
+      "key": "waitTime",
+      "value": "8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Canal chama a rota protegida (SIDECAR)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// ============================================================================",
+              "//  Guarda o que os passos seguintes precisam.",
+              "//",
+              "//  Sao DOIS identificadores de jornada no fluxo, e troca-los e o erro mais",
+              "//  facil de cometer:",
+              "//    authIdPdc  — desta chamada, usado no POLLING",
+              "//    authIdApp  — do passo do aplicativo, usado no OTP",
+              "// ============================================================================",
+              "",
+              "pm.test('rota interceptada devolveu desafio', function () {",
+              "    pm.response.to.have.status(401);",
+              "});",
+              "",
+              "const corpo = pm.response.json();",
+              "",
+              "if (corpo.status !== 'challenge_required') {",
+              "    throw new Error('Esperado challenge_required, veio: ' + JSON.stringify(corpo));",
+              "}",
+              "",
+              "pm.collectionVariables.set('authIdPdc', corpo.authId);",
+              "",
+              "// O deeplink vem no campo de mensagem do callback de espera. O aplicativo",
+              "// extrairia dali o identificador da propria sessao.",
+              "let deeplink = null;",
+              "",
+              "for (const callback of corpo.callbacks || []) {",
+              "    for (const campo of callback.output || []) {",
+              "        if (campo.name === 'message' && String(campo.value).includes('://')) {",
+              "            deeplink = String(campo.value);",
+              "        }",
+              "        if (campo.name === 'waitTime') {",
+              "            pm.collectionVariables.set('waitTime', campo.value);",
+              "        }",
+              "    }",
+              "}",
+              "",
+              "if (!deeplink) {",
+              "    throw new Error('Deeplink nao encontrado nos callbacks');",
+              "}",
+              "",
+              "const uuid = new URL(deeplink.replace('portosuperapp://', 'https://x/'))",
+              "    .searchParams.get('authIndexValue');",
+              "",
+              "if (!uuid) {",
+              "    throw new Error('authIndexValue nao encontrado no deeplink: ' + deeplink);",
+              "}",
+              "",
+              "pm.collectionVariables.set('transactionId', uuid);",
+              "pm.collectionVariables.set('hotpCounter', 0);",
+              "",
+              "console.log('authId do PDC : ' + corpo.authId.substring(0, 20) + '...');",
+              "console.log('transaction   : ' + uuid);",
+              "console.log('waitTime      : ' + pm.collectionVariables.get('waitTime') + ' ms');",
+              ""
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "x-porto-authentication",
+            "value": "{{channelToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "url": {
+          "raw": "{{sidecarUrl}}{{rotaProtegida}}"
+        },
+        "description": "Rota da matriz. O sidecar barra e dispara a jornada."
+      }
+    },
+    {
+      "name": "2. Aplicativo inicia a transaction (GATEWAY)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// ============================================================================",
+              "//  Sessao do aplicativo — identificador DIFERENTE do PDC.",
+              "// ============================================================================",
+              "",
+              "pm.test('transaction iniciada', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const corpo = pm.response.json();",
+              "",
+              "if (!corpo.authId) {",
+              "    throw new Error('Sem authId na resposta: ' + JSON.stringify(corpo));",
+              "}",
+              "",
+              "pm.collectionVariables.set('authIdApp', corpo.authId);",
+              "",
+              "// O callback vem com OTP:AUTHFY no campo de entrada. Guardado inteiro para ser",
+              "// devolvido como veio, com o codigo preenchido.",
+              "pm.collectionVariables.set('otpCallback', JSON.stringify(corpo.callbacks || []));",
+              "",
+              "console.log('authId do APP : ' + corpo.authId.substring(0, 20) + '...');",
+              ""
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept-API-Version",
+            "value": "resource=2.1"
+          },
+          {
+            "key": "x-porto-authentication",
+            "value": "{{channelToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{gatewayUrl}}/json/realms/{{realm}}/authenticate?realm=%2F{{realm}}&authIndexType=transaction&authIndexValue={{transactionId}}"
+        },
+        "description": "Papel do aplicativo. NAO passa pelo sidecar."
+      }
+    },
+    {
+      "name": "3. Aplicativo submete o OTP (GATEWAY)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// ============================================================================",
+              "//  Gera o codigo HOTP de 6 digitos a partir da semente do autenticador.",
+              "//",
+              "//  HOTP avanca por CONTADOR, nao por tempo. Cada codigo e de uso unico, e o",
+              "//  contador precisa acompanhar o do servidor — por isso ele e guardado na",
+              "//  colecao e incrementado a cada uso.",
+              "//",
+              "//  Se o codigo for recusado, o contador local esta atrasado. Rodar de novo",
+              "//  avanca um passo; repetir ate casar.",
+              "// ============================================================================",
+              "",
+              "const semente = pm.environment.get('otpSecret');",
+              "",
+              "if (!semente) {",
+              "    throw new Error('Preencher a variavel de ambiente otpSecret com a semente do autenticador');",
+              "}",
+              "",
+              "// O contador comeca em 0 e avanca a cada geracao.",
+              "let contador = parseInt(pm.collectionVariables.get('hotpCounter') || '0', 10);",
+              "",
+              "// --- Base32 -> bytes -------------------------------------------------------",
+              "function base32Decode(texto) {",
+              "    const alfabeto = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';",
+              "    const limpo = texto.toUpperCase().replace(/=+$/, '').replace(/[^A-Z2-7]/g, '');",
+              "",
+              "    let bits = 0;",
+              "    let valor = 0;",
+              "    const bytes = [];",
+              "",
+              "    for (const caractere of limpo) {",
+              "        const indice = alfabeto.indexOf(caractere);",
+              "        if (indice === -1) continue;",
+              "",
+              "        valor = (valor << 5) | indice;",
+              "        bits += 5;",
+              "",
+              "        if (bits >= 8) {",
+              "            bytes.push((valor >>> (bits - 8)) & 0xFF);",
+              "            bits -= 8;",
+              "        }",
+              "    }",
+              "    return Buffer.from(bytes);",
+              "}",
+              "",
+              "// --- HOTP ------------------------------------------------------------------",
+              "const crypto = require('crypto');",
+              "",
+              "const chave = base32Decode(semente);",
+              "if (chave.length === 0) {",
+              "    throw new Error('Semente invalida: nada restou depois de decodificar');",
+              "}",
+              "",
+              "// Contador em 8 bytes, big-endian.",
+              "const bufferContador = Buffer.alloc(8);",
+              "bufferContador.writeUInt32BE(0, 0);",
+              "bufferContador.writeUInt32BE(contador, 4);",
+              "",
+              "const assinatura = crypto.createHmac('sha1', chave).update(bufferContador).digest();",
+              "",
+              "// Truncamento dinamico, conforme a especificacao.",
+              "const deslocamento = assinatura[assinatura.length - 1] & 0x0F;",
+              "const codigo = (",
+              "    ((assinatura[deslocamento]     & 0x7F) << 24) |",
+              "    ((assinatura[deslocamento + 1] & 0xFF) << 16) |",
+              "    ((assinatura[deslocamento + 2] & 0xFF) <<  8) |",
+              "     (assinatura[deslocamento + 3] & 0xFF)",
+              ") % 1000000;",
+              "",
+              "const codigoTexto = String(codigo).padStart(6, '0');",
+              "",
+              "pm.collectionVariables.set('otpCode', codigoTexto);",
+              "pm.collectionVariables.set('hotpCounter', contador + 1);",
+              "",
+              "console.log('OTP gerado: ' + codigoTexto + '  (contador ' + contador + ')');",
+              "",
+              "// ============================================================================",
+              "//  Monta o corpo devolvendo o callback como veio, com o codigo no campo de",
+              "//  entrada. Alterar estrutura ou ordem quebra a jornada.",
+              "// ============================================================================",
+              "",
+              "const callbacks = JSON.parse(pm.collectionVariables.get('otpCallback') || '[]');",
+              "",
+              "for (const callback of callbacks) {",
+              "    for (const campo of callback.input || []) {",
+              "        if (campo.name === 'IDToken1') {",
+              "            campo.value = pm.collectionVariables.get('otpCode');",
+              "        }",
+              "    }",
+              "}",
+              "",
+              "pm.collectionVariables.set('otpBody', JSON.stringify({",
+              "    authId: pm.collectionVariables.get('authIdApp'),",
+              "    callbacks: callbacks",
+              "}));",
+              ""
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('OTP aceito', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const corpo = pm.response.json();",
+              "",
+              "if (corpo.callbacks) {",
+              "    console.log('OTP recusado — o contador pode estar atrasado.');",
+              "    console.log('Rodar esta requisicao de novo avanca um passo no contador.');",
+              "} else {",
+              "    console.log('Transaction resolvida. O polling do PDC deve concluir agora.');",
+              "}",
+              ""
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept-API-Version",
+            "value": "resource=2.1"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{{otpBody}}"
+        },
+        "url": {
+          "raw": "{{gatewayUrl}}/json/realms/{{realm}}/authenticate"
+        },
+        "description": "O codigo e gerado no script de pre-requisicao."
+      }
+    },
+    {
+      "name": "4. Polling do canal (SIDECAR)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// ============================================================================",
+              "//  Polling — reenvia o mesmo authId do PDC, com callbacks vazios.",
+              "//",
+              "//  Repetir a cada waitTime ate a resposta mudar.",
+              "// ============================================================================",
+              "",
+              "const corpo = pm.response.json();",
+              "",
+              "if (pm.response.code === 200 && corpo.status === 'authorized') {",
+              "    console.log('JORNADA CONCLUIDA. O sidecar obteve o token.');",
+              "",
+              "} else if (pm.response.code === 401 && corpo.status === 'challenge_required') {",
+              "    console.log('Aplicativo ainda nao resolveu. Aguardar '",
+              "        + pm.collectionVariables.get('waitTime') + ' ms e repetir.');",
+              "",
+              "} else if (pm.response.code === 403) {",
+              "    console.log('Recusado pelo provedor. Ver o log do sidecar para o motivo.');",
+              "",
+              "} else {",
+              "    console.log('Resposta inesperada: ' + pm.response.code + ' — ' + pm.response.text());",
+              "}",
+              ""
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"authId\": \"{{authIdPdc}}\",\n  \"callbacks\": []\n}"
+        },
+        "url": {
+          "raw": "{{sidecarUrl}}/ciam/challenge"
+        },
+        "description": "Repetir ate concluir. Usa o authId do PDC, nao o do aplicativo."
+      }
+    }
+  ]
+}
