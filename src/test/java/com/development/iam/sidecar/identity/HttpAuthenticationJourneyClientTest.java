@@ -193,6 +193,25 @@ class HttpAuthenticationJourneyClientTest {
                     .withHeader("Accept-API-Version", equalTo("resource=2.1")));
         }
 
+        @Test
+        void debugCorpoDoWireMock() throws Exception {
+            gatewayReplies(401, "{\"code\":401,\"message\":\"Biometria recusada\"}");
+
+            var http = java.net.http.HttpClient.newHttpClient();
+            var response = http.send(
+                    java.net.http.HttpRequest.newBuilder()
+                            .uri(java.net.URI.create("http://127.0.0.1:" + gateway.port()
+                                    + "/am/json/realms/alpha/authenticate"
+                                    + "?authIndexType=service&authIndexValue=" + JOURNEY))
+                            .header("Content-Type", "application/json")
+                            .POST(java.net.http.HttpRequest.BodyPublishers.ofString("{}"))
+                            .build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+
+            System.out.println(">>> STATUS=" + response.statusCode());
+            System.out.println(">>> BODY=[" + response.body() + "]");
+        }
+
         /**
          * A jornada é escolhida por configuração. Conduzir a errada autentica o
          * cliente por um caminho que não é o pretendido, e o sidecar não teria

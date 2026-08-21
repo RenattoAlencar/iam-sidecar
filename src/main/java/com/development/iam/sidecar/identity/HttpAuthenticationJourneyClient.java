@@ -209,6 +209,7 @@ public class HttpAuthenticationJourneyClient implements AuthenticationJourneyCli
      * a sessão emitida encerra o assunto mesmo que traga callbacks residuais.
      */
     private JourneyOutcome translate(String stepName, int status, String body) {
+        System.out.println(">>> STATUS=" + status + " BODY=[" + body + "]");   // TEMPORÁRIO
         if (status == HttpStatus.REQUEST_TIMEOUT.value()) {
             // 408: a sessao da jornada expirou por inatividade. Nao e recusa —
             // nada foi negado, o cliente apenas demorou. O canal precisa
