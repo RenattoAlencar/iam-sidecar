@@ -1,0 +1,60 @@
+# Instância do sidecar para o canal PDC — Novo Portal do Cliente.
+#
+# Só para a demonstração: em produção estes valores vêm do ConfigMap do
+# ambiente. O que muda entre uma instância e outra é exatamente isto — a
+# jornada e a matriz de rotas.
+
+server:
+  port: 8080
+management:
+  server:
+    port: 8090
+
+proxy:
+  target: http://127.0.0.1:8081
+  max-body-bytes: 1024
+  reserved-headers:
+    - x-sidecar-verified
+
+  intercept-rules:
+
+    # Ver os próprios dados cadastrais expõe o que serve para alguém se passar
+    # pelo cliente em outro canal — nome completo, documento, endereço. É
+    # consulta, e mesmo assim exige confirmação.
+    - name: consulta-dados-cadastrais
+      path: /api/v1/clientes/dados-cadastrais
+      methods: [GET]
+
+    # Alterar contato é o caminho clássico da fraude: troca-se o telefone, e o
+    # código de recuperação passa a chegar em outro aparelho.
+    - name: alteracao-contato
+      path: /api/v1/clientes/contatos
+      methods: [PUT]
+
+    # Consultar limites não move dinheiro, mas informa a quem prepara uma
+    # fraude quanto cabe passar sem chamar atenção.
+    - name: consulta-limites
+      path: /api/v1/conta/limites
+      methods: [GET]
+
+identity:
+  base-url: http://127.0.0.1:8082/am
+  realm: alpha
+
+  # A jornada é do canal. É o que diferencia esta instância da outra.
+  journey: pdc-bank-authz-consultivo
+  journey-type: service
+
+  client-id: pdc-demo
+  client-secret: segredo-da-demonstracao
+  redirect-uri: https://pdc.demo/callback
+  scopes: openid
+  session-cookie-name: cookie-de-sessao
+  channel-token-header: x-canal-autenticacao
+  authenticator-code-header: x-canal-codigo
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [PDC] [%X{correlationId:-sem-correlacao}] %logger{24} - %msg%n"
+  level:
+    com.development.iam.sidecar: DEBUG

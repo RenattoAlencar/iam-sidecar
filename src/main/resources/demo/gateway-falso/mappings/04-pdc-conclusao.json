@@ -1,0 +1,22 @@
+{
+  "priority": 1,
+  "scenarioName": "pdc",
+  "requiredScenarioState": "pdc-poll-3",
+  "newScenarioState": "pdc-concluido",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "pdc-bank-authz-consultivo" }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "tokenId": "0sRqQMuGP-sessao-do-pdc",
+      "successUrl": "/am/console",
+      "realm": "/"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "priority": 1,
+  "scenarioName": "pdc",
+  "requiredScenarioState": "Started",
+  "newScenarioState": "pdc-poll-1",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "pdc-bank-authz-consultivo" }
+    },
+    "headers": { "x-canal-autenticacao": { "matches": ".+" } }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "authId": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.sessao-pdc-demonstracao",
+      "callbacks": [
+        {
+          "type": "PollingWaitCallback",
+          "output": [
+            { "name": "waitTime", "value": "8000" },
+            { "name": "message", "value": "portosuperapp://porto/portobank/pdc?realm=%2Falpha&authIndexType=transaction&authIndexValue=8f14e45f-demo" }
+          ]
+        },
+        {
+          "type": "ConfirmationCallback",
+          "output": [
+            { "name": "prompt", "value": "" },
+            { "name": "messageType", "value": 0 },
+            { "name": "options", "value": ["Cancel"] },
+            { "name": "optionType", "value": -1 },
+            { "name": "defaultOption", "value": 0 }
+          ],
+          "input": [ { "name": "IDToken2", "value": 100 } ]
+        }
+      ]
+    }
+  }
+}

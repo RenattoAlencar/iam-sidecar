@@ -1,0 +1,58 @@
+# Instância do sidecar para o canal CIAM — embarque de fator de segurança.
+#
+# Só para a demonstração: em produção estes valores vêm do ConfigMap do
+# ambiente. O que muda entre uma instância e outra é exatamente isto — a
+# jornada e a matriz de rotas.
+
+server:
+  port: 8083
+management:
+  server:
+    port: 8093
+
+proxy:
+  target: http://127.0.0.1:8084
+  max-body-bytes: 1024
+  reserved-headers:
+    - x-sidecar-verified
+
+  intercept-rules:
+
+    # Cadastrar um fator não move dinheiro agora, mas define o que vai
+    # autorizar movimentação depois. Cadastro indevido compromete tudo o que
+    # vier a seguir.
+    - name: cadastro-fator
+      path: /api/v1/fatores/dispositivo
+      methods: [POST]
+
+    # Remover um fator derruba a proteção que ele oferecia. Precisa da mesma
+    # confirmação que o cadastro — senão basta remover para contornar.
+    - name: remocao-fator
+      path: /api/v1/fatores/dispositivo
+      methods: [DELETE]
+
+    # O GET no mesmo endereço fica de fora: ver quais fatores estão ativos é
+    # consulta, e o cliente precisa dessa lista para gerenciar os próprios
+    # dispositivos.
+
+identity:
+  base-url: http://127.0.0.1:8085/am
+  realm: alpha
+
+  # A jornada é do canal. É o que diferencia esta instância da outra.
+  journey: factor-onboarding
+  journey-type: service
+
+  client-id: ciam-demo
+  client-secret: segredo-da-demonstracao
+  redirect-uri: https://ciam.demo/callback
+  scopes: openid
+  session-cookie-name: cookie-de-sessao
+  channel-token-header: x-canal-autenticacao
+  authenticator-code-header: x-canal-codigo
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [CIAM] [%X{correlationId:-sem-correlacao}] %logger{24} - %msg%n"
+  level:
+    com.development.iam.sidecar: DEBUG

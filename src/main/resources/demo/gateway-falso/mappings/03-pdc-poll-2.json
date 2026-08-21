@@ -1,0 +1,29 @@
+{
+  "priority": 1,
+  "scenarioName": "pdc",
+  "requiredScenarioState": "pdc-poll-2",
+  "newScenarioState": "pdc-poll-3",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "pdc-bank-authz-consultivo" }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "authId": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.sessao-pdc-demonstracao",
+      "callbacks": [
+        {
+          "type": "PollingWaitCallback",
+          "output": [
+            { "name": "waitTime", "value": "8000" },
+            { "name": "message", "value": "Aguardando confirmacao no aplicativo" }
+          ]
+        }
+      ]
+    }
+  }
+}

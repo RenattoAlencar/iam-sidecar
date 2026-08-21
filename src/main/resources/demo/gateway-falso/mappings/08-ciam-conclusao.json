@@ -1,0 +1,21 @@
+{
+  "priority": 1,
+  "scenarioName": "ciam",
+  "requiredScenarioState": "ciam-concluido",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "factor-onboarding" }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "tokenId": "0sRqQMuGP-sessao-do-ciam",
+      "successUrl": "/enduser/?realm=/alpha",
+      "realm": "/alpha"
+    }
+  }
+}

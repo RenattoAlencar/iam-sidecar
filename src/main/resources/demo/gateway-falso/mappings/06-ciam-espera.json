@@ -1,0 +1,29 @@
+{
+  "priority": 1,
+  "scenarioName": "ciam",
+  "requiredScenarioState": "ciam-biometria",
+  "newScenarioState": "ciam-otp",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "factor-onboarding" }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "authId": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.sessao-ciam-demonstracao",
+      "callbacks": [
+        {
+          "type": "PollingWaitCallback",
+          "output": [
+            { "name": "waitTime", "value": "5000" },
+            { "name": "message", "value": "Please wait..." }
+          ]
+        }
+      ]
+    }
+  }
+}

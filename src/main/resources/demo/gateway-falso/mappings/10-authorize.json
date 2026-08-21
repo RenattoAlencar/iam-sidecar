@@ -1,0 +1,12 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/am/oauth2/realms/alpha/authorize"
+  },
+  "response": {
+    "status": 302,
+    "headers": {
+      "Location": "https://canal.demo/callback?code=codigo-da-demonstracao&state=abc"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "priority": 10,
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate"
+  },
+  "response": {
+    "status": 401,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "code": 401,
+      "reason": "Unauthorized",
+      "message": "Token invalido (Journey encerrada)"
+    }
+  }
+}

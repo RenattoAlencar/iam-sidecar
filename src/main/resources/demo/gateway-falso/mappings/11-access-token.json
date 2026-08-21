@@ -1,0 +1,16 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/oauth2/realms/alpha/access_token"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "access_token": "token-emitido-na-demonstracao",
+      "token_type": "Bearer",
+      "expires_in": 3599,
+      "scope": "openid"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "priority": 1,
+  "scenarioName": "ciam",
+  "requiredScenarioState": "Started",
+  "newScenarioState": "ciam-biometria",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "factor-onboarding" }
+    },
+    "headers": { "x-canal-autenticacao": { "matches": ".+" } }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "authId": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.sessao-ciam-demonstracao",
+      "callbacks": [
+        {
+          "type": "NameCallback",
+          "output": [
+            { "name": "prompt", "value": "CHALLENGE_REQUIRED" },
+            { "name": "defaultValue", "value": "BIOMETRIA:UNICO" }
+          ],
+          "input": [ { "name": "IDToken1", "value": "BIOMETRIA:UNICO" } ]
+        }
+      ]
+    }
+  }
+}

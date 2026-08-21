@@ -1,0 +1,91 @@
+# Duas instâncias do sidecar, uma por canal.
+#
+# É o desenho de produção: um sidecar para um BFF, e a jornada vem da
+# configuração da instância. O mesmo componente, dois canais, jornadas
+# diferentes.
+#
+#   PDC     127.0.0.1:8080  sidecar → :8081 BFF → :8082 gateway    (host 18080)
+#   CIAM   127.0.0.1:8083  sidecar → :8084 BFF → :8085 gateway    (host 18083)
+#
+# Cada trio compartilha um namespace de rede, replicando um pod. Só os sidecars
+# são alcançáveis de fora.
+
+services:
+
+  # ---------------------------------------------------------------- PDC ------
+
+  sidecar-pdc:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sidecar-pdc
+    ports:
+      - "18080:8080"
+      - "18090:8090"
+    volumes:
+      - ./pdc.yml:/app/config/application.yml:ro
+    environment:
+      SPRING_CONFIG_ADDITIONAL_LOCATION: /app/config/
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bff-pdc:
+    image: mendhak/http-https-echo:37
+    container_name: bff-pdc
+    network_mode: "service:sidecar-pdc"
+    environment:
+      HTTP_PORT: "8081"
+    depends_on:
+      - sidecar-pdc
+
+  gateway-pdc:
+    image: wiremock/wiremock:3.9.1
+    container_name: gateway-pdc
+    network_mode: "service:sidecar-pdc"
+    command: ["--port", "8082", "--verbose"]
+    volumes:
+      - ./gateway-falso/mappings:/home/wiremock/mappings:ro
+    depends_on:
+      - sidecar-pdc
+
+  # -------------------------------------------------------------- CIAM ------
+
+  sidecar-ciam:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sidecar-ciam
+    ports:
+      - "18083:8083"
+      - "18093:8093"
+    volumes:
+      - ./ciam.yml:/app/config/application.yml:ro
+    environment:
+      SPRING_CONFIG_ADDITIONAL_LOCATION: /app/config/
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8093/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bff-ciam:
+    image: mendhak/http-https-echo:37
+    container_name: bff-ciam
+    network_mode: "service:sidecar-ciam"
+    environment:
+      HTTP_PORT: "8084"
+    depends_on:
+      - sidecar-ciam
+
+  gateway-ciam:
+    image: wiremock/wiremock:3.9.1
+    container_name: gateway-ciam
+    network_mode: "service:sidecar-ciam"
+    command: ["--port", "8085", "--verbose"]
+    volumes:
+      - ./gateway-falso/mappings:/home/wiremock/mappings:ro
+    depends_on:
+      - sidecar-ciam

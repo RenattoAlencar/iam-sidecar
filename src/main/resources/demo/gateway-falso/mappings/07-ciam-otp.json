@@ -1,0 +1,34 @@
+{
+  "priority": 1,
+  "scenarioName": "ciam",
+  "requiredScenarioState": "ciam-otp",
+  "newScenarioState": "ciam-concluido",
+  "request": {
+    "method": "POST",
+    "urlPath": "/am/json/realms/alpha/authenticate",
+    "queryParameters": {
+      "authIndexValue": { "equalTo": "factor-onboarding" }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "authId": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.sessao-ciam-demonstracao",
+      "callbacks": [
+        {
+          "type": "TextOutputCallback",
+          "output": [
+            { "name": "message", "value": "{\"code\":\"otpauth://hotp/Authfy:00000000000?secret=DEMOSEEDDEMOSEED&issuer=Authfy&counter=0\"}" },
+            { "name": "messageType", "value": "0" }
+          ]
+        },
+        {
+          "type": "NameCallback",
+          "output": [ { "name": "prompt", "value": "OTP_REQUIRED" } ],
+          "input": [ { "name": "IDToken2", "value": "" } ]
+        }
+      ]
+    }
+  }
+}
