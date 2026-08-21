@@ -28,6 +28,18 @@ public record InterceptRule(
     }
 
 
+    /**
+     * Chaves de identidade da regra, <strong>uma por método</strong>.
+     * <p>
+     * Usadas apenas para detectar sobreposição na validação de boot. A chave
+     * combina método e path, e não só o path, porque duas regras no mesmo
+     * endereço com métodos disjuntos são legítimas — é o caso de
+     * {@code GET /pix/chaves} sendo passthrough e {@code POST} exigindo
+     * confirmação.
+     * <p>
+     * Reduzir para uma chave por regra recusaria exatamente essa configuração,
+     * que é o caso de uso principal da matriz.
+     */
     public Set<String> identityKeys() {
 
         Set<String> keys = new LinkedHashSet<>();

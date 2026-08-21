@@ -194,7 +194,13 @@ class TokenIssuanceIntegrationTest {
     /**
      * Cada emissão gera um par de PKCE novo, e o gateway confere que o
      * verificador corresponde ao desafio. Duas emissões seguidas confirmam que a
-     * geração e a conferência funcionam de verdade, e não por acaso.
+     * geração e a conferência funcionam de verdade, e não por acaso — se o par
+     * fosse reaproveitado ou o desafio não correspondesse, a segunda falharia.
+     * <p>
+     * <strong>Os tokens não são comparados entre si.</strong> O provedor pode
+     * reaproveitar o token quando as duas emissões usam a mesma sessão, o mesmo
+     * cliente e os mesmos escopos dentro de uma janela curta — e aí tokens
+     * iguais seriam comportamento normal, não defeito.
      */
     @Test
     @DisplayName("duas emissões seguidas funcionam, cada uma com seu PKCE")
@@ -202,11 +208,13 @@ class TokenIssuanceIntegrationTest {
         AccessToken first = issuer.issue(SESSION_ID);
         AccessToken second = issuer.issue(SESSION_ID);
 
-        assertThat(first.isUsable()).isTrue();
-        assertThat(second.isUsable()).isTrue();
-        assertThat(first.accessToken())
-                .as("cada emissão deveria produzir um token próprio")
-                .isNotEqualTo(second.accessToken());
+        assertThat(first.isUsable())
+                .as("a primeira emissão deveria produzir um token utilizável")
+                .isTrue();
+
+        assertThat(second.isUsable())
+                .as("a segunda emissão confirma que o par de PKCE novo é aceito")
+                .isTrue();
     }
 
     private static String resumir(String valor) {

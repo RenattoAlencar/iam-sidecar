@@ -469,9 +469,13 @@ class SidecarFunctionalTest {
             HttpResponse<String> response = send(toSidecar("/__slow").GET().build());
 
             assertThat(response.statusCode()).isEqualTo(502);
-            assertThat(response.body())
-                    .doesNotContain("127.0.0.1")
-                    .doesNotContain(String.valueOf(BACKEND.port()));
+
+            // Sem asserção sobre a porta: ela é aleatória, e o corpo carrega o
+            // identificador de correlação, que é alfanumérico. Os dígitos da
+            // porta podem aparecer nele por acaso, e o teste falharia sem
+            // defeito — o tipo de instabilidade que faz um time desativar o
+            // conjunto inteiro.
+            assertThat(response.body()).doesNotContain("127.0.0.1");
         }
     }
 }

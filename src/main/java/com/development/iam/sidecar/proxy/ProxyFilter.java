@@ -294,8 +294,13 @@ public class ProxyFilter extends OncePerRequestFilter {
      * <p>
      * Mesma forma que o gateway devolveu, com os campos de entrada preenchidos.
      * O canal reenvia inclusive nos passos de espera, sem alterar nada.
+     * <p>
+     * Visível ao pacote, e não privado: o desserializador instancia este tipo
+     * por reflexão, e classe privada é ponto de atrito conhecido. O sintoma da
+     * falha seria traiçoeiro — a leitura devolveria nulo sempre, e toda resposta
+     * a desafio viraria recusa por corpo ilegível.
      */
-    private record ChallengeAnswer(String authId, List<Map<String, Object>> callbacks) {
+    record ChallengeAnswer(String authId, List<Map<String, Object>> callbacks) {
     }
 
     /**

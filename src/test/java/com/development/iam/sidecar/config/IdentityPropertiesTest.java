@@ -224,7 +224,7 @@ class IdentityPropertiesTest {
                             "identity.client-id=sidecar-client",
                             "identity.client-secret=segredo",
                             "identity.redirect-uri=https://canal.exemplo.com.br/callback",
-                            "identity.channel-token-header=x-canal-autenticacao")
+                            "identity.channel-token-header=x-canal-authentication")
                     .run(context -> assertThat(context).hasFailed());
         }
 

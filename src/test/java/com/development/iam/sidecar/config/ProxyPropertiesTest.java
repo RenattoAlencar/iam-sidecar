@@ -219,6 +219,31 @@ class ProxyPropertiesTest {
                     .run(context -> assertThat(context).hasFailed());
         }
 
+        /**
+         * O campo que sustenta a proteção do header forjado. Com a configuração
+         * vindo de variável de ambiente, um erro de bind deixaria a lista vazia
+         * sem que nada falhasse — e o canal passaria a conseguir declarar por
+         * conta própria que a confirmação aconteceu.
+         * <p>
+         * O teste também confirma que a lista separada por vírgula funciona, que
+         * é o formato usado pela variável de ambiente.
+         */
+        @Test
+        @DisplayName("headers reservados declarados chegam ao bind")
+        void reservedHeadersAreBound() {
+            runner.withPropertyValues(
+                            "proxy.target=http://127.0.0.1:8081",
+                            "proxy.reserved-headers=x-sidecar-verified,x-sidecar-subject",
+                            "proxy.intercept-rules[0].name=pix-transfer",
+                            "proxy.intercept-rules[0].path=/api/v1/pix/transferencia",
+                            "proxy.intercept-rules[0].methods[0]=POST")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        assertThat(context.getBean(ProxyProperties.class).reservedHeaders())
+                                .containsExactly("x-sidecar-verified", "x-sidecar-subject");
+                    });
+        }
+
         @Test
         @DisplayName("os valores padrão são os documentados")
         void appliesDocumentedDefaults() {

@@ -1,8 +1,8 @@
 package com.development.iam.sidecar.identity;
 
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import tools.jackson.annotation.JsonIgnoreProperties;
+import tools.jackson.annotation.JsonProperty;
 
 /**
  * Token emitido pelo gateway ao fim da jornada.

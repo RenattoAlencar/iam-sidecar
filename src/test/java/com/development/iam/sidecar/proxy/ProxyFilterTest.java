@@ -451,6 +451,26 @@ class ProxyFilterTest {
             verify(forwarder, never()).forward(any(), any());
         }
 
+        /**
+         * O contrato do gateway não pede o token do canal na continuação — ele
+         * só identifica quem inicia a jornada. Exigi-lo aqui faria o sidecar
+         * recusar um passo que o contrato permite, e o canal não teria como
+         * saber por quê.
+         */
+        @Test
+        @DisplayName("a continuação não exige o token do canal")
+        void continuationDoesNotRequireChannelToken() throws Exception {
+            when(journeyClient.advance(any(), any())).thenReturn(challenge());
+
+            MockHttpServletRequest request = request("POST", CHALLENGE_PATH);
+            request.setContentType("application/json");
+            request.setContent(answerWith(AUTH_ID).getBytes(StandardCharsets.UTF_8));
+
+            filter.doFilter(request, new MockHttpServletResponse(), chain);
+
+            verify(journeyClient).advance(eq(AUTH_ID), any());
+        }
+
         @Test
         @DisplayName("gateway indisponível vira 503")
         void unavailableGatewayIsServiceUnavailable() throws Exception {
@@ -594,20 +614,6 @@ class ProxyFilterTest {
             assertThat(response.getContentAsString())
                     .doesNotContain("MALFORMED_PATH")
                     .doesNotContain("normaliz");
-        }
-
-        @Test
-        @DisplayName("a continuação não exige o token do canal")
-        void continuationDoesNotRequireChannelToken() throws Exception {
-            when(journeyClient.advance(any(), any())).thenReturn(challenge());
-
-            MockHttpServletRequest request = request("POST", CHALLENGE_PATH);
-            request.setContentType("application/json");
-            request.setContent(ChallengeEndpoint.answerWith(AUTH_ID).getBytes(StandardCharsets.UTF_8));
-
-            filter.doFilter(request, new MockHttpServletResponse(), chain);
-
-            verify(journeyClient).advance(eq(AUTH_ID), any());
         }
     }
 }

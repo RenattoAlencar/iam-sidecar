@@ -8,6 +8,14 @@ import java.util.regex.Pattern;
 
 public final class PathNormalizer {
 
+    /**
+     * Teto de tamanho antes de qualquer processamento.
+     * <p>
+     * Vale sobre o path apenas — a query não entra no {@code getRequestURI()} —,
+     * então é folgado mesmo para os endereços profundos que os serviços reais
+     * expõem. Path desproporcional é tentativa de estourar limite de parser ou
+     * de poluir log, nunca requisição real de canal.
+     */
     private static final int MAX_LENGTH = 2048;
 
     private static final String PATH_SEPARATOR = "/";
@@ -15,6 +23,14 @@ public final class PathNormalizer {
     private static final String CURRENT_SEGMENT = ".";
     private static final String PARENT_SEGMENT = "..";
 
+    /**
+     * Formas codificadas do separador de path.
+     * <p>
+     * As duas grafias estão listadas porque a verificação acontece sobre a
+     * string crua, sem normalizar caixa — e precisa ser assim: depois de
+     * decodificar, {@code %2F} vira barra comum e fica indistinguível de um
+     * separador legítimo. Reduzir para uma grafia só deixaria a outra passar.
+     */
     private static final String[] ENCODED_SEPARATORS = {"%2f", "%2F"};
 
     private static final Pattern PATH_SEPARATOR_PATTERN =

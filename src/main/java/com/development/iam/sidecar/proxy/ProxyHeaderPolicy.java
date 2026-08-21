@@ -15,6 +15,23 @@ public final class ProxyHeaderPolicy {
             "upgrade"
     );
 
+    /**
+     * Headers que o proxy reconstrói e por isso não copia.
+     * <p>
+     * {@code host} precisa apontar para o destino real; {@code content-length} é
+     * recalculado a partir do corpo efetivamente escrito.
+     * <p>
+     * <strong>Os {@code x-forwarded-*} estão aqui de propósito, e não por
+     * engano.</strong> Eles parecem headers de aplicação, mas o proxy precisa
+     * <em>anexar</em> o próprio salto à cadeia recebida — e quem faz isso é o
+     * encaminhador, escrevendo o valor final uma vez só. Se fossem copiados como
+     * header comum, a requisição sairia com dois valores para o mesmo nome, e o
+     * destino leria um ou outro conforme a implementação.
+     * <p>
+     * Como o {@code x-forwarded-for} carrega o IP real do cliente, usado em
+     * investigação de fraude, ler o valor errado não é detalhe. Movê-los para
+     * fora desta lista reintroduz a duplicação.
+     */
     private static final Set<String> REBUILT_BY_PROXY = normalizedSet(
             "host",
             "content-length",
